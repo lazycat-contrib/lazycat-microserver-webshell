@@ -86,6 +86,9 @@ export function createWorkspaceAPI({
     return response.json();
   };
 
+  let mutationVersion = 0;
+  const pendingActions = new Set();
+
   const postAction = async (action, payload = {}, {
     focus = true,
     preferStateActiveTab = true,
@@ -100,29 +103,37 @@ export function createWorkspaceAPI({
       throw new Error("Workspace API is disposed.");
     }
     const size = normalizedSize();
-    const response = await fetchImpl(workspaceURL(requestName, size), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, cols: size.cols, rows: size.rows, ...payload }),
-    });
-    if (!response.ok) {
-      throw await responseError(response, `Workspace action failed (${response.status})`, requestName);
-    }
-    const state = await response.json();
-    if (disposed || !isCurrentRequest(requestName, generation)) {
-      return state;
-    }
-    ensureWorkspaceResponseSelector(state, requestName);
-    observeServerRevision(state);
-    if (applyResponse) {
-      applyWorkspaceState(state, {
-        focus,
-        instanceName: requestName,
-        generation,
-        preferStateActiveTab,
+    const mutation = { requestName, generation };
+    mutationVersion += 1;
+    pendingActions.add(mutation);
+    try {
+      const response = await fetchImpl(workspaceURL(requestName, size), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, cols: size.cols, rows: size.rows, ...payload }),
       });
+      if (!response.ok) {
+        throw await responseError(response, `Workspace action failed (${response.status})`, requestName);
+      }
+      const state = await response.json();
+      if (disposed || !isCurrentRequest(requestName, generation)) {
+        return state;
+      }
+      ensureWorkspaceResponseSelector(state, requestName);
+      observeServerRevision(state);
+      if (applyResponse) {
+        applyWorkspaceState(state, {
+          focus,
+          instanceName: requestName,
+          generation,
+          preferStateActiveTab,
+        });
+      }
+      return state;
+    } finally {
+      pendingActions.delete(mutation);
+      if (!disposed && isCurrentRequest(requestName, generation)) mutationVersion += 1;
     }
-    return state;
   };
 
   const dispose = () => {
@@ -130,6 +141,8 @@ export function createWorkspaceAPI({
       return false;
     }
     disposed = true;
+    pendingActions.clear();
+    mutationVersion += 1;
     return true;
   };
 
@@ -137,6 +150,10 @@ export function createWorkspaceAPI({
     activityURL,
     dispose,
     fetchState,
+    getMutationState: () => Object.freeze({
+      version: mutationVersion,
+      pending: [...pendingActions].some((action) => action.requestName === getActiveName() && action.generation === getActiveGeneration()),
+    }),
     isDisposed: () => disposed,
     postAction,
     workspaceURL,

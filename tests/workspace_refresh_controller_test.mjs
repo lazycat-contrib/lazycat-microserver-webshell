@@ -175,3 +175,98 @@ test("workspace refresh controller schedules retry after a failed direct refresh
   controller.clearRetry();
   assert.equal(windowObject.size(), 0);
 });
+
+const membershipHarness = () => {
+  const replies = [];
+  const applied = [];
+  const timer = createTimerWindow();
+  const current = { name: "demo", generation: 1, revision: 1, mutation: { version: 0, pending: false } };
+  const controller = createWorkspaceRefreshController({
+    getActiveName: () => current.name, getActiveGeneration: () => current.generation,
+    isCurrentRequest: (name, generation) => name === current.name && generation === current.generation,
+    getStateRevision: () => current.revision, getMutationState: () => current.mutation,
+    fetchWorkspaceState: () => new Promise((resolve, reject) => replies.push({ resolve, reject })),
+    applyWorkspaceState: (state, options) => { applied.push({ state, options }); current.revision += 1; return true; },
+    lifecycleOptions: { windowObject: timer },
+  });
+  return { controller, replies, applied, current, timer };
+};
+const membershipState = (id) => ({ selector: "demo", tabs: [{ id: `tab-${id}`, panes: [{ id }] }] });
+
+test("membership hints coalesce and new in-flight observations request one fresh snapshot", async () => {
+  const h = membershipHarness();
+  const first = h.controller.syncMembership({ paneIDs: ["one"] });
+  assert.equal(h.controller.syncMembership({ paneIDs: ["one"] }), first);
+  assert.equal(h.controller.syncMembership({ paneIDs: ["two"] }), first);
+  assert.equal(h.replies.length, 1);
+  h.replies[0].resolve(membershipState("one"));
+  await Promise.resolve();
+  assert.equal(h.applied.length, 0, "superseded observation must not apply a stale membership list");
+  assert.equal(h.replies.length, 2);
+  h.replies[1].resolve(membershipState("two"));
+  assert.equal(await first, true);
+  assert.deepEqual(h.applied[0].options, { focus: false, instanceName: "demo", generation: 1, preserveLocalState: true });
+  assert.equal(h.timer.size(), 0, "membership sync must not add polling or retry timers");
+});
+
+test("membership fetches cannot overwrite local actions, newer state, targets, or disposed controllers", async () => {
+  for (const mutate of [
+    (h) => { h.current.mutation = { version: 1, pending: true }; },
+    (h) => { h.current.mutation = { version: 2, pending: false }; },
+    (h) => { h.current.revision += 1; },
+    (h) => { h.current.generation += 1; },
+    (h) => h.controller.dispose(),
+  ]) {
+    const h = membershipHarness();
+    const task = h.controller.syncMembership({ paneIDs: ["new"] });
+    mutate(h);
+    h.replies[0].resolve(membershipState("new"));
+    assert.equal(await task, false);
+    assert.equal(h.applied.length, 0);
+  }
+  const h = membershipHarness();
+  h.current.mutation.pending = true;
+  assert.equal(await h.controller.syncMembership({ paneIDs: ["new"] }), false);
+  assert.equal(h.replies.length, 0);
+});
+
+test("failed membership fetch retries only on a subsequent activity observation", async () => {
+  const h = membershipHarness();
+  const first = h.controller.syncMembership({ paneIDs: ["new"] });
+  h.replies[0].reject(new Error("temporary"));
+  await assert.rejects(first, /temporary/);
+  assert.equal(h.timer.size(), 0);
+  const next = h.controller.syncMembership({ paneIDs: ["new"] });
+  h.replies[1].resolve(membershipState("new"));
+  assert.equal(await next, true);
+});
+
+test("membership sync leaves initial bootstrap selection to the full workspace restore", async () => {
+  const h = membershipHarness();
+  h.current.revision = 0;
+  assert.equal(await h.controller.syncMembership({ paneIDs: ["new"] }), false);
+  assert.equal(h.replies.length, 0);
+});
+
+test("retiring an old target request cannot clear a new target's in-flight membership request", async () => {
+  const h = membershipHarness();
+  const old = h.controller.syncMembership({ paneIDs: ["old"] });
+  h.current.name = "other"; h.current.generation = 2;
+  const next = h.controller.syncMembership({ paneIDs: ["new"] });
+  h.replies[0].resolve(membershipState("old"));
+  assert.equal(await old, false);
+  assert.equal(h.controller.syncMembership({ paneIDs: ["new"] }), next);
+  assert.equal(h.replies.length, 2);
+  h.replies[1].resolve({ ...membershipState("new"), selector: "other" });
+  assert.equal(await next, true);
+  assert.equal(h.applied[0].options.instanceName, "other");
+});
+
+test("a slow ordinary refresh cannot roll back a newer applied workspace", async () => {
+  const h = membershipHarness();
+  const task = h.controller.request();
+  h.current.revision += 1;
+  h.replies[0].resolve(membershipState("old"));
+  h.controller.apply(await task);
+  assert.equal(h.applied.length, 0);
+});

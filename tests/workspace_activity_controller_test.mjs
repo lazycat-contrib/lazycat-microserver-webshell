@@ -76,3 +76,72 @@ test("activity timers are latest-only and disposed together", () => {
   assert.equal(windowObject.timeoutCount(), 0);
   assert.equal(controller.dispose(), false);
 });
+
+test("activity detects added and removed panes without requesting unchanged membership", async () => {
+  const panes = new Map([["one", { id: "one", name: "demo" }]]);
+  let response = { panes: [{ id: "one" }] };
+  const changes = [];
+  const clock = createWindow();
+  const controller = createWorkspaceActivityController({
+    windowObject: clock, getTabs: () => [{ panes }], getActiveName: () => "demo", getInstanceGeneration: () => 4,
+    getActivityURL: () => "/activity", fetchFunction: async () => ({ ok: true, json: async () => response }),
+    syncPaneMembership: async (value) => { changes.push(value); },
+  });
+  controller.startActivityRefresh();
+  await controller.refreshActivity();
+  assert.equal(changes.length, 0);
+  response = { panes: [{ id: "one" }, { id: "two" }] };
+  await controller.refreshActivity();
+  assert.deepEqual(changes.at(-1), { instanceName: "demo", generation: 4, paneIDs: ["one", "two"] });
+  panes.set("two", { id: "two", name: "demo" });
+  await controller.refreshActivity();
+  assert.equal(changes.length, 1);
+  response = { panes: [{ id: "two" }] };
+  await controller.refreshActivity();
+  assert.deepEqual(changes.at(-1).paneIDs, ["two"]);
+  assert.equal(clock.intervalCount(), 1);
+  assert.equal(clock.timeoutCount(), 0);
+  response = {};
+  await controller.refreshActivity();
+  response = { panes: [{ id: "bad" }], error: "partial response" };
+  await assert.rejects(controller.refreshActivity(), /partial response/);
+  assert.equal(changes.length, 2, "incomplete/error responses cannot remove local panes");
+  controller.dispose();
+});
+
+test("out-of-order or disposed activity replies cannot trigger structural recovery", async () => {
+  const replies = [];
+  const changes = [];
+  const controller = createWorkspaceActivityController({
+    getTabs: () => [{ panes: new Map([["one", { id: "one" }]]) }],
+    getActiveName: () => "demo", getActivityURL: () => "/activity",
+    fetchFunction: () => new Promise((resolve) => replies.push((panes) => resolve({ ok: true, json: async () => ({ panes }) }))),
+    syncPaneMembership: async (value) => changes.push(value),
+  });
+  const first = controller.refreshActivity();
+  const second = controller.refreshActivity();
+  replies[1]([{ id: "one" }]); await second;
+  replies[0]([{ id: "stale" }]); await first;
+  assert.equal(changes.length, 0);
+  const late = controller.refreshActivity();
+  controller.dispose();
+  replies[2]([{ id: "late" }]); await late;
+  assert.equal(changes.length, 0);
+});
+
+test("activity observed before a local action cannot trigger redundant membership refresh afterward", async () => {
+  let reply;
+  let version = 0;
+  let changes = 0;
+  const controller = createWorkspaceActivityController({ getActiveName: () => "demo", getActivityURL: () => "/activity",
+    getTabs: () => [{ panes: new Map([["new-local", { id: "new-local" }]]) }],
+    getMutationState: () => ({ version, pending: false }),
+    fetchFunction: () => new Promise((resolve) => { reply = resolve; }),
+    syncPaneMembership: async () => { changes += 1; },
+  });
+  const pending = controller.refreshActivity();
+  version += 2;
+  reply({ ok: true, json: async () => ({ panes: [{ id: "old" }] }) });
+  await pending;
+  assert.equal(changes, 0);
+});

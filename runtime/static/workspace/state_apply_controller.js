@@ -4,6 +4,7 @@ export function createWorkspaceStateApplyController({
   getTabs = () => new Map(),
   getActiveName = () => "",
   getActiveGeneration = () => 0,
+  getActiveTabId = () => "",
   isCurrentRequest = () => true,
   ensureResponseSelector = () => {},
   responseSelector = () => "",
@@ -22,6 +23,7 @@ export function createWorkspaceStateApplyController({
   renderTabLabel = () => {},
   renderTabLayout = () => {},
   clearTabButtons = () => {},
+  syncTabButtonOrder = () => {},
   applyRecentTabIds = () => [],
   loadStoredRecentTabIds = () => [],
   getRecentTabIds = () => [],
@@ -39,6 +41,7 @@ export function createWorkspaceStateApplyController({
 } = {}) {
   let applying = false;
   let disposed = false;
+  let revision = 0;
   const lifecycle = lifecycleFactory(lifecycleOptions);
 
   const runApplying = (task) => {
@@ -59,6 +62,7 @@ export function createWorkspaceStateApplyController({
     instanceName = getActiveName(),
     generation = getActiveGeneration(),
     preferStateActiveTab = false,
+    preserveLocalState = false,
   } = {}) => measureTask("workspace apply", () => {
     const expectedName = String(instanceName || "").trim();
     ensureResponseSelector(state, expectedName);
@@ -73,7 +77,11 @@ export function createWorkspaceStateApplyController({
     const restartTab = readRestartTabForName(targetName);
     const requestedTab = String(readRequestedTab() || "").trim();
     const tabs = getTabs();
+    const previousActiveTabId = getActiveTabId();
     const workspaceGenerationChanged = setWorkspaceGenerationFromState(state, targetName);
+    const passive = preserveLocalState && !workspaceGenerationChanged;
+    const changedTabs = new Set();
+    revision += 1;
     const previousApplying = applying;
     applying = true;
     try {
@@ -94,7 +102,7 @@ export function createWorkspaceStateApplyController({
           }
         }
 
-        clearTabButtons();
+        if (!passive) clearTabButtons();
         for (const tabState of state?.tabs || []) {
           let tab = tabs.get(tabState.id);
           if (!tab) {
@@ -110,11 +118,12 @@ export function createWorkspaceStateApplyController({
           }
           tab.label = tabState.label || tab.label;
           tab.customLabel = Boolean(tabState.custom_label);
-          tab.activePaneId = tabState.active_pane_id;
-          tab.layout = tabState.layout || null;
-          recreateTabButton(tab);
-
           const wantedPaneIDs = new Set((tabState.panes || []).map((pane) => pane.id));
+          const membershipChanged = wantedPaneIDs.size !== tab.panes.size || [...wantedPaneIDs].some((id) => !tab.panes.has(id));
+          if (membershipChanged) changedTabs.add(tab.id);
+          if (!passive || !wantedPaneIDs.has(tab.activePaneId)) tab.activePaneId = tabState.active_pane_id;
+          if (!passive || membershipChanged) tab.layout = tabState.layout || null;
+          if (!passive) recreateTabButton(tab);
           for (const pane of [...tab.panes.values()]) {
             if (!wantedPaneIDs.has(pane.id)) {
               if (pane.name === targetName) {
@@ -144,7 +153,23 @@ export function createWorkspaceStateApplyController({
             updatePaneActivity(paneState);
           }
           renderTabLabel(tab);
-          renderTabLayout(tab);
+          if (!passive || membershipChanged) renderTabLayout(tab);
+        }
+
+        if (passive) {
+          syncTabButtonOrder((state.tabs || []).map((tab) => tabs.get(tab.id)));
+          const current = tabs.get(previousActiveTabId) || tabs.get(getActiveTabId()) || tabs.values().next().value || null;
+          if (current && (current.id !== previousActiveTabId || changedTabs.has(current.id))) {
+            setActiveTab(current.id, { focus: false, remember: false, rememberRecent: false, claimCurrentDevice: false });
+            lifecycle.scheduleFrame(() => {
+              if (isCurrentRequest(targetName, generation) && tabs.get(current.id) === current && getActiveTabId() === current.id) {
+                connectPendingSessionsForTab(current, { allowHidden: true });
+              }
+            });
+          } else if (!current) clearActiveTab();
+          updateEmptyState();
+          scheduleOverviewRender();
+          return true;
         }
 
         const stateRecentTabIds = Array.isArray(state?.recent_tab_ids) ? state.recent_tab_ids : null;
@@ -179,7 +204,8 @@ export function createWorkspaceStateApplyController({
         updateEmptyState();
         scheduleOverviewRender();
         lifecycle.scheduleFrame(() => {
-          if (!isCurrentRequest(targetName, generation)) {
+          if (!isCurrentRequest(targetName, generation) || !nextActiveTab
+            || tabs.get(nextActiveTab.id) !== nextActiveTab || getActiveTabId() !== nextActiveTab.id) {
             return;
           }
           resizeActiveTabForCurrentDevice();
@@ -187,9 +213,10 @@ export function createWorkspaceStateApplyController({
         });
       return true;
     } finally {
-      clearRestartTabForReload();
+      if (!passive) clearRestartTabForReload();
       applying = previousApplying;
-      flushPendingMembershipRefresh("workspace_restored");
+      if (passive) flushPendingMembershipRefresh("workspace_membership_synced");
+      else flushPendingMembershipRefresh("workspace_restored");
     }
   });
 
@@ -208,6 +235,7 @@ export function createWorkspaceStateApplyController({
     dispose,
     isApplying: () => applying,
     isDisposed: () => disposed,
+    getRevision: () => revision,
     runApplying,
   });
 }

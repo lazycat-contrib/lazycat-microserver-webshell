@@ -123,6 +123,17 @@ export function createWorkspaceTabView({
     }
   };
 
+  const syncTabButtonOrder = (orderedTabs) => {
+    if (disposed || !tabsElement) return false;
+    let reference = tabsElement.firstElementChild;
+    for (const tab of orderedTabs || []) {
+      if (!tab?.button) continue;
+      if (tab.button === reference) reference = reference.nextElementSibling;
+      else tabsElement.insertBefore(tab.button, reference);
+    }
+    return true;
+  };
+
   const setActiveTabVisuals = (items, activeTabId) => {
     if (disposed) {
       return false;
@@ -161,5 +172,6 @@ export function createWorkspaceTabView({
     moveTabButton,
     recreateTabButton,
     setActiveTabVisuals,
+    syncTabButtonOrder,
   });
 }
