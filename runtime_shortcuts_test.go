@@ -829,6 +829,15 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 		"recordEvent(session, \"presentation_render_failed\")",
 		"recordEvent(session, \"presentation_commit_complete\"",
 		"const resizeProtocol = String(message?.resize_protocol || \"\").trim();",
+		"const beginConnection = (session, { connectionEpoch = session?.connectionEpoch } = {}) => {",
+		"session.resizeController = new TerminalResizeController();",
+		"session.resizeConnectionEpoch = nextConnectionEpoch;",
+		"session.resizeConnectionTransitionPending = true;",
+		"resizeConnectionEpoch: 0,",
+		"resizeConnectionTransitionPending: false,",
+		"terminalResize.beginConnection?.(session, { connectionEpoch });",
+		"const duplicateAppliedAck = session.resizeAckPending !== true",
+		"recordEvent(session, \"resize_ack_duplicate\"",
 	} {
 		if !strings.Contains(runtimeSource, want) {
 			t.Fatalf("runtime resize epoch ACK guard missing %q", want)
@@ -8336,7 +8345,10 @@ func TestRuntimeWebSocketReconnectHealthGuard(t *testing.T) {
 		"baseDelayMs = 500,",
 		"maxDelayMs = 15 * 1000,",
 		"const healthTimeout = session.agentPreparing ? agentPrepareTimeoutMs : healthTimeoutMs;",
-		"const attachTimeout = Number(session.attachReadyTimeoutMs || 0) || attachReadyTimeoutMs;",
+		"if (lifecycle.checkAttachReady(session, socket)) {",
+		"const attachWatches = new WeakMap();",
+		"attachMaxDurationMs = 60 * 1000,",
+		"checkedAt >= watch.deadline || checkedAt - watch.lastProgressAt >= watch.idleTimeout",
 		"const isReady = (session) => Boolean(",
 		"const checkHealth = (session, { connect = true, force = false, allowHidden = false } = {}) => {",
 		"const probeOpenSocket = (session, { allowHidden = false } = {}) => {",

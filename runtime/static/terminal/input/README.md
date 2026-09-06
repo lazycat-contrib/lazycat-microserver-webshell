@@ -32,7 +32,7 @@
 
 `installSession()` 绑定一个 session 的 Ghostty data listener，并把 disposable 注册到 session cleanup。pane close 会先清 pending/buffer/queue 和 timer，再移除 listener；页面 `dispose()` 会清理所有仍存在 session 并拒绝迟到 timer/data callback。
 
-pending input 的过期 timer 绑定当前 logical channel generation 或 client lease。lease 变化时暂停而不是丢弃用户输入；当前 lease 仍在 replay 或等待 resize ACK 时只触发连接健康恢复并重新计时。
+pending input 的过期 timer 绑定当前 logical channel generation 或 client lease。lease 变化时暂停而不是丢弃用户输入；当前 lease 仍在 replay 或等待 resize ACK 时只触发连接健康恢复并重新计时。resize ACK ready gate 只允许等待当前 connection 的事务：connection transition 必须由 resize owner 退休旧 ACK 并迁移 latest claim，输入模块不自行清除 `resizeAckPending`，新 replay/resize 完成后按原顺序 flush。
 
 ## 文件清单
 

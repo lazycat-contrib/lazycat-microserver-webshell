@@ -37,6 +37,7 @@
 - 基线的 presentation observer 在终端已经打开后启动，不能证明首次 replay 阶段的用户可见 Canvas commit 次数为零。
 - 2026-09-04 初始化性能渐进渲染修复前基线按预期失败，命令为 `HEADLESS=1 WEBSHELL_ENABLE_INITIALIZATION_PERFORMANCE=1 WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" node tests-auto/run-playwright.mjs tests-auto/05-terminal-output/test.mjs`，产物为 `artifacts/2026-09-04T07-49-30-748Z/`。desktop probe 在约 2249.5ms 捕获到 `采集中 / 0.0ms / 0 行`，下一次可见变化已经是约 4876ms 的 `已完成 / 2651ms / 106 行`；不存在任何 progressive pending row，真实断言失败。截图显示最终面板正常，JSONL/terminal timeline 证明采集期间 Provider、Unified 和 replay 事件持续到达，根因边界锁定在 initialization performance snapshot/render。
 - `node --test tests/initialization_performance_test.mjs` 修复前同样按预期失败：记录第一条 startup event 后 collecting snapshot 仍没有对应 row。
+- 2026-09-04 完整回归 `artifacts/2026-09-04T10-10-58-479Z/` 在输出动作前等待 `data-connection=open` 超时。desktop/mobile active pane 均已 `renderReady=true`、`hasPresentedFrame=true`、`data-connection-retrying=false`，Canvas 非空且 socket 持续收消息；只有应用 resume deadline 留下非权威的 `data-connection=reconnecting`。该失败与输出链路无关，属于过时前置断言。
 
 ## 已确认根因
 
@@ -51,6 +52,15 @@ P0-1 的本地 Go 实现将相邻 history chunk 合并到有界的 `historyRepla
 P0-4 的 hold 修复已将 hold canvas backing 尺寸改为 CSS 尺寸乘当前 renderer DPR，并使用对应 transform 绘制；该修复只处理画质，不改变 presentation 唤醒、resize epoch 或 replay 顺序。
 
 初始化性能渐进渲染方案：collector 在未完成时基于当前 startup metrics、startup events 和进度最领先的 terminal session 构建 live snapshot，追加一条带实时等待时长的 pending 行；独立 diagnostics lifecycle 以有界 interval 驱动总耗时刷新，完成后立即停止。最终首个 presentation commit 仍是唯一冻结边界，不改变业务初始化流程。
+
+当前测试边界调整：初始进入和临时 tab 返回只等待真实 terminal host 可见，不再要求非权威展示属性恰好为 `open`。场景仍必须完成普通输出、约 1.5MiB 输出、隐藏 tab 持续输出和 resize 持续输出，并验证 Canvas 改变、presentation `unsafe=0`、output overload/stale drop 为 0、前后每页只有一条活跃 Unified socket；因此不会把真实输出、渲染或连接故障误判为通过。
+
+## 验证预期
+
+- 普通、1.5MiB、隐藏 tab 和 resize 期间的真实 PTY 输出全部完成。
+- presentation `unsafe=0`，Canvas 非空且内容改变，output overload/stale drop 为 0。
+- desktop/mobile 前后各只有一条 active Unified socket，初始化性能可选采样完成后冻结。
+- API、WebShell asset、console error 和 pageerror 为零。
 
 ## 验证结果
 
@@ -76,7 +86,9 @@ P0-4 的 hold 修复已将 hold canvas backing 尺寸改为 CSS 尺寸乘当前 
 - `go test ./... -skip '^TestRuntimeTerminalCanvasResidueGuard$'`：通过。跳过项是仓库 HEAD 已存在且与本次无关的 CSS guard（要求 `object-fit: none`，当前产品样式为 `contain`）；未为本功能放宽或删除该断言。
 - `lzc-cli project release`：通过，生成 39 MiB `webshell-progressive-initialization.lpk`。
 - `git diff --check`：通过。
+- 当前用户结果前置修正后独立通过，并在最终全量的 `artifacts/2026-09-04T11-13-07-841Z/` 再次通过普通/1.5MiB/隐藏 tab/resize 输出、`unsafe=0`、零 overload/stale drop、Canvas 变化和唯一 Unified socket 门禁。
 
+## 运行命令和环境变量
 
 ```sh
 npm run build

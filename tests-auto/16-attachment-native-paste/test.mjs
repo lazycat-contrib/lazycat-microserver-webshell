@@ -7,10 +7,15 @@ const uploadResponseMatches = (response) => {
 const terminalHost = (state) => state.page.locator(".terminal-pane.active .terminal-host").first();
 
 const waitForTerminal = async (state) => {
-  await state.page.waitForSelector(
-    '.terminal-pane.active .pane-shell[data-connection="open"]',
-    { timeout: 60_000 },
-  );
+  await terminalHost(state).waitFor({ state: "visible", timeout: 60_000 });
+  await state.page.waitForFunction(() => {
+    const shell = document.querySelector(".terminal-pane.active .pane-shell");
+    const canvas = shell?.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
+    return shell?.dataset.renderReady === "true"
+      && shell.dataset.hasPresentedFrame === "true"
+      && Number(canvas?.width || 0) > 0
+      && Number(canvas?.height || 0) > 0;
+  }, null, { timeout: 60_000 });
 };
 
 const inputPayloads = (state, start = 0) => state.page.evaluate((offset) => {
@@ -177,6 +182,11 @@ const cleanupRemotePaths = async (state, paths) => {
   if (unique.length === 0 || state.page.isClosed()) return;
   const marker = `AUTO_PASTE_CLEAN_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   await terminalHost(state).click();
+  await state.page.evaluate(() => {
+    const textarea = document.querySelector(".terminal-pane.active .terminal-host textarea");
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("terminal textarea unavailable for attachment cleanup");
+    textarea.focus({ preventScroll: true });
+  });
   await state.page.keyboard.press("Control+C");
   await state.page.keyboard.insertText(
     `rm -f -- ${unique.map(shellQuote).join(" ")}; printf '%s\\n' '${marker}'`,
@@ -353,6 +363,11 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   }
   const uploadedPaths = { desktop: [], mobile: [] };
   const results = {};
+  const cleanupTrackedPaths = async (state, paths) => {
+    await cleanupRemotePaths(state, paths);
+    const cleaned = new Set(paths);
+    uploadedPaths[state.name] = uploadedPaths[state.name].filter((path) => !cleaned.has(path));
+  };
   try {
     for (const state of Object.values(states)) {
       await waitForTerminal(state);
@@ -370,17 +385,17 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
       const image = await runNativeImagePaste(state, `${prefix}_IMAGE`);
       results[state.name].image = image;
       uploadedPaths[state.name].push(...image.paths);
-      await cleanupRemotePaths(state, image.paths);
+      await cleanupTrackedPaths(state, image.paths);
 
       const file = await runSyntheticFilePaste(state, `${prefix}_FILE`);
       results[state.name].file = file;
       uploadedPaths[state.name].push(...file.paths);
-      await cleanupRemotePaths(state, file.paths);
+      await cleanupTrackedPaths(state, file.paths);
 
       const manual = await runManualUploadThenPaste(state, `${prefix}_MANUAL`);
       results[state.name].manual = manual;
       uploadedPaths[state.name].push(...manual.paths);
-      await cleanupRemotePaths(state, manual.paths);
+      await cleanupTrackedPaths(state, manual.paths);
 
       results[state.name].observer = await pasteObserverSnapshot(state);
       results[state.name].canvas = await canvasSummary(state);
@@ -402,13 +417,20 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
       results,
     });
   } finally {
+    const cleanupFailures = [];
     for (const state of Object.values(states)) {
-      await cleanupRemotePaths(state, uploadedPaths[state.name] || []).catch((error) => eventLog({
-        status: "error",
-        window: state.name,
-        action: "cleanup-uploaded-attachments",
-        message: error?.message || String(error),
-      }));
+      await cleanupRemotePaths(state, uploadedPaths[state.name] || []).catch(async (error) => {
+        cleanupFailures.push(`${state.name}: ${error?.message || String(error)}`);
+        await eventLog({
+          status: "error",
+          window: state.name,
+          action: "cleanup-uploaded-attachments",
+          message: error?.message || String(error),
+        });
+      });
+    }
+    if (cleanupFailures.length > 0) {
+      throw new Error(`attachment cleanup failed:\n${cleanupFailures.join("\n")}`);
     }
   }
 }

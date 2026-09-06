@@ -19,6 +19,8 @@
 
 Queue turn complete 只登记待确认 cursor/sequence。只有对应输出已经按序写入 Ghostty、输出队列为空且 `appliedHistoryCursor` 到达边界后才发送 ACK；ACK 不等待 Canvas 绘制。默认 ACK serializer 由 `output_controller.js` 持有，会再次校验当前 socket、Unified channel、connection epoch 和 channel generation 后才发送 JSON；单 pane ACK 失败只能请求该 logical stream 恢复，不能关闭 Unified 物理连接或影响兄弟 pane。output lifecycle 对每个 pane 只允许一个待执行的 RAF/fallback timer；重复 schedule 不创建新任务，flush 入口会清理另一句柄。
 
+大历史回放不使用 live 输出默认的每轮 8 条限制；默认回放轮次受 512 KiB / 12ms 预算约束。单次 Ghostty 写入切成最多 32 KiB 的片段，相邻兼容条目在写入前合并，每次实际解析后重新检查耗时，避免大量原始小帧拖成数千次 RAF，也避免一次大 parse 独占主线程。显式 `maxEntries` 仍按入队原始条目计数，保留 resize ACK fence 的冻结边界；显式 force 且无预算的调用保持完整 drain 语义。写入回调中新增的输出按序保留，reset/dispose 后不得推进旧 batch 的 cursor。
+
 ## 状态所有权
 
 `output_controller.js` 是 `outputQueue`、`outputQueueSize`、`outputQueueGeneration`、`outputOverloadPending`、`queueTurnReceived*` 和 `pendingQueueTurnAck` 的唯一修改者。session state 只提供初始字段；resize 只能调用 `getQueueEntryCount()`、`getQueuedBytes()`、`flush()` 和 `scheduleFlush()`，不得读取或修改队列数组。

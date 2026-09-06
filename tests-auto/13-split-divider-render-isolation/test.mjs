@@ -269,6 +269,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     blank: await paneColorSummary(page, blankPaneID),
     source: await paneColorSummary(page, sourcePaneID),
     resizeFrames: await page.evaluate(() => (window.__testsAutoResizeFrames || []).length),
+    resizeResponses: await page.evaluate(() => (window.__testsAutoResizeResponses || []).length),
     sockets: await unifiedSocketSnapshot(page),
   };
   if (before.blank.live.red !== 0 || before.blank.hold.red !== 0 || before.blank.live.bright !== 0) {
@@ -331,17 +332,42 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     paneWidths: await page.locator(".terminal-pane.active .pane-shell").evaluateAll((shells) => (
       Object.fromEntries(shells.map((shell) => [shell.dataset.paneId || "", shell.getBoundingClientRect().width]))
     )),
-    terminalHealth: await page.evaluate((ids) => {
+    terminalHealth: await page.evaluate(({ ids, resizeFrameOffset, resizeResponseOffset }) => {
       const timelines = globalThis.__testsAutoTerminalTimelineSnapshot?.() || [];
+      const resizeFrames = (window.__testsAutoResizeFrames || []).slice(resizeFrameOffset);
+      const resizeResponses = (window.__testsAutoResizeResponses || []).slice(resizeResponseOffset);
       return Object.fromEntries(ids.map((id) => {
         const events = timelines.find((pane) => pane.paneID === id)?.events || [];
+        const latestResizeState = [...events].reverse().find((event) => event?.flags)?.flags || null;
+        const claims = resizeFrames.filter((frame) => frame.claim === true && (!frame.paneID || frame.paneID === id));
+        const finalClaim = claims.at(-1) || null;
+        const matchingAck = finalClaim
+          ? resizeResponses.find((response) => (
+            response.type === "resize-applied"
+            && (!response.paneID || response.paneID === id)
+            && response.resizeEpoch === String(finalClaim.resizeEpoch || "")
+            && response.cols === Number(finalClaim.cols)
+            && response.rows === Number(finalClaim.rows)
+          )) || null
+          : null;
         return [id, {
           resizeAckStale: events.filter((event) => event.type === "resize_ack_stale").length,
           retryExhausted: events.filter((event) => event.type === "presentation_retry_exhausted").length,
           liveGeometryComplete: events.filter((event) => event.type === "live_geometry_complete").length,
+          latestResizeState,
+          finalClaim,
+          matchingAck,
+          resizeErrors: resizeResponses.filter((response) => (
+            response.type === "resize-error" && (!response.paneID || response.paneID === id)
+          )),
+          settled: Boolean(finalClaim && matchingAck),
         }];
       }));
-    }, [sourcePaneID, blankPaneID]),
+    }, {
+      ids: [sourcePaneID, blankPaneID],
+      resizeFrameOffset: before.resizeFrames,
+      resizeResponseOffset: before.resizeResponses,
+    }),
   };
 
   const wrongCanvasOwners = drag.samples.filter((sample) => (
@@ -473,7 +499,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error(`split drag replaced the Unified socket: ${JSON.stringify({ before: before.sockets, after: after.sockets })}`);
   }
   const unhealthyTerminal = Object.entries(after.terminalHealth).filter(([, health]) => (
-    health.resizeAckStale > 0 || health.retryExhausted > 0 || health.liveGeometryComplete < 1
+    health.resizeAckStale > 0 || health.retryExhausted > 0 || health.resizeErrors.length > 0 || !health.settled
   ));
   if (unhealthyTerminal.length > 0) {
     throw new Error(`split drag left an unhealthy resize/presentation transaction: ${JSON.stringify(unhealthyTerminal)}`);

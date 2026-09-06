@@ -176,6 +176,59 @@ test("output model measures and splits Unicode while preserving byte order", () 
   assert.equal(coalesceTerminalOutputBatch(["ab", "cd"], "text", 4), "abcd");
 });
 
+test("fragmented client replay drains by bytes rather than eight original frames per animation turn", () => {
+  const h = createHarness({ sessionOptions: { replayCommitted: false }, controllerOptions: { now: () => 100, queueSoftLimitBytes: 4 * 1024 * 1024 } });
+  const expected = new Uint8Array(16324 * 107);
+  for (let i = 0; i < 16324; i += 1) {
+    const chunk = new Uint8Array(107).fill(i % 251);
+    expected.set(chunk, i * 107);
+    h.controller.write(h.session, chunk);
+  }
+  let turns = 0;
+  while (h.controller.hasQueued(h.session) && turns < 120) {
+    assert.equal(h.clock.runFrame(), true);
+    turns += 1;
+  }
+  assert.equal(h.controller.hasQueued(h.session), false, "1.75 MB replay must not need thousands of RAF turns");
+  assert.equal(h.session.appliedHistoryCursor, BigInt(expected.length));
+  assert.deepEqual(Buffer.concat(h.replayWrites.map((data) => Buffer.from(data))), Buffer.from(expected));
+  assert.equal(h.writes.length, 0, "replay must never use a visible write");
+});
+
+test("drain yields after actual terminal write time and preserves explicit resize entry bounds", () => {
+  let now = 0;
+  const h = createHarness({ sessionOptions: { replayCommitted: false }, controllerOptions: { now: () => now, flushTimeBudgetMs: 12 } });
+  h.session.term.writeReplay = (data) => { h.replayWrites.push(data); now += 20; };
+  for (let i = 0; i < 4; i += 1) h.controller.write(h.session, new Uint8Array(32768).fill(i));
+  h.clock.runFrame();
+  assert.equal(h.replayWrites.length, 1, "one slow write must consume this turn's time budget");
+  assert.ok(h.controller.hasQueued(h.session), "slow parser must yield before the whole replay is consumed");
+  const before = h.controller.getQueueEntryCount(h.session);
+  h.controller.flush(h.session, { force: true, maxEntries: 1, maxTimeMs: 12, scheduleRemainder: false });
+  assert.equal(h.controller.getQueueEntryCount(h.session), before - 1, "explicit ACK fence counts refer to original entries");
+});
+
+test("parser callbacks cannot discard appended output or resurrect a retired queue", () => {
+  const h = createHarness({ sessionOptions: { replayCommitted: false }, controllerOptions: { now: () => 100 } });
+  const first = new Uint8Array(32768).fill(65);
+  h.controller.write(h.session, first);
+  h.controller.write(h.session, new Uint8Array([66]));
+  let calls = 0;
+  h.session.term.writeReplay = (data) => {
+    h.replayWrites.push(data);
+    if (++calls === 1) h.controller.write(h.session, new Uint8Array([67]));
+  };
+  h.clock.runFrame();
+  assert.equal(h.controller.getQueuedBytes(h.session), 0);
+  assert.equal(h.session.appliedHistoryCursor, 32770n);
+  assert.deepEqual(Buffer.concat(h.replayWrites.map((data) => Buffer.from(data))), Buffer.concat([Buffer.from(first), Buffer.from('BC')]));
+  h.controller.write(h.session, first);
+  h.session.term.writeReplay = () => h.controller.discard(h.session);
+  h.clock.runFrame();
+  assert.equal(h.session.appliedHistoryCursor, 32770n, "retired write cannot advance the new history cursor");
+  assert.equal(h.controller.getQueuedBytes(h.session), 0);
+});
+
 test("controller drains ordered output, commits history cursors, and rejects stale generations", () => {
   const harness = createHarness();
   const data = new Uint8Array([65, 66, 67, 68]);

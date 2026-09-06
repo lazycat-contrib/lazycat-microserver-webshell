@@ -5,7 +5,7 @@
 - 状态：active
 - 类型：PC / mobile / lifecycle
 - 真实依赖：Google Chrome、系统剪贴板、Provider、persistent agent、PTY、Unified WebSocket、附件上传 API
-- 相关模块和源码入口：`runtime/static/app/paste/`（待建立）、`runtime/static/attachments/`、`runtime/static/terminal/input/ime/`、`runtime/static/terminal/interaction/`、`runtime/static/terminal/session/`、`runtime/static/global-runtime.js`
+- 相关模块和源码入口：`runtime/static/app/paste/`、`runtime/static/attachments/`、`runtime/static/terminal/input/ime/`、`runtime/static/terminal/interaction/`、`runtime/static/terminal/session/`、`runtime/static/global-runtime.js`
 
 ## 触发条件
 
@@ -108,6 +108,10 @@ node tests-auto/run-playwright.mjs tests-auto/16-attachment-native-paste/test.mj
 - 最终路径输入 payload 均只包含每条远端路径一次且没有 CR/LF；desktop Canvas 为 `1440x861`、mobile Canvas 为 `390x714`，均有非透明像素；每页 Unified WebSocket 为 `created=1, active=1`。console error、pageerror 和未预期 API error 为零，测试清理了远端临时文件和隔离 tab。
 - 行为/构建验证：`npm run build` 通过，Vite 产物为 4 个 JavaScript 文件；`node --test tests/*.mjs` 共 432 项通过；`go test ./... -count=1` 通过；`git diff --check` 通过。
 - 2026-09-04 用户确认手动测试通过。对话未提供具体设备型号、系统和浏览器版本，因此这里记录为用户报告，不替代下述真实移动设备元数据限制。
+- 本轮预检 `artifacts/2026-09-04T10-40-16-339Z/` 在任何 paste 动作前等待 desktop `data-connection=open` 超时；desktop/mobile active pane 都已 `renderReady=true`、`hasPresentedFrame=true`、Canvas 非空，mobile 为 open，desktop 仅被 resume deadline 留下 `data-connection=reconnecting` 且实际 retry=false。判定为过时展示属性前置，不是附件/paste 失败。
+- 场景前置改为 terminal host 可见、稳定 presentation 和非空 Canvas；后续系统文本、PNG、DataTransfer 双文件、手动上传后路径粘贴、权限降级、原 pane fence、远端清理和 Unified socket 断言全部保留，因此真实 paste 或连接问题不会被放宽。
+- 完整回归 `artifacts/2026-09-04T11-09-18-503Z/` 的所有 paste/upload 断言及每批首次 `rm -f` 清理均通过，但 `finally` 对已清理路径再次执行重复清理；mobile textarea 此时已失焦，cleanup marker 超时并被旧代码只记录 error 后吞掉。测试现在成功清理后立即移出 pending 列表、cleanup 前显式聚焦 textarea，并让任何最终 cleanup failure 直接使场景失败。
+- 修正后独立通过，并在最终全量的 `artifacts/2026-09-04T11-17-03-295Z/` 再次通过全部 PC/mobile paste/upload/权限降级/原 pane/socket/Canvas 断言；远端附件和隔离 tab 清理完成，事件日志无 cleanup error。
 
 ## 已知限制
 
@@ -115,4 +119,4 @@ node tests-auto/run-playwright.mjs tests-auto/16-attachment-native-paste/test.mj
 - Chromium 通常允许通过 Async Clipboard 写入 PNG，但不保证允许写入任意文件 MIME。通用文件分支可以在真实浏览器中通过 `DataTransfer(File)` 验证，系统文件管理器复制文件仍需真机补充验证。
 - 本场景会在真实目标创建临时附件；测试必须在 `finally` 中通过原 pane 清理远端文件，并关闭运行器创建的隔离 tab/context。
 - 用户已报告手动验证通过，但未提供可归档的 Android/iOS 设备、宿主版本或系统文件管理器复制文件记录；因此不能宣称这些具体设备组合已由自动化完全覆盖。
-- 本次提交前没有运行 `./tests-auto/test-all.sh` 全场景串行回归；已运行并通过本场景、全量 Node 和全量 Go 测试。
+- 完整 `./tests-auto/test-all.sh` 结果以本轮最终验证记录为准。

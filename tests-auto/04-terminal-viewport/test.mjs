@@ -159,13 +159,41 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required so the real environment loads the current workspace frontend");
   }
   const { desktop, mobile } = states;
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await mobile.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  const desktopHost = desktop.page.locator(".terminal-pane.active .terminal-host").first();
+  const mobileHost = mobile.page.locator(".terminal-pane.active .terminal-host").first();
+  await desktopHost.waitFor({ state: "visible", timeout: 60_000 });
+  await mobileHost.waitFor({ state: "visible", timeout: 60_000 });
 
   const marker = `AUTO_VIEWPORT_${Date.now()}`;
-  await desktop.page.locator(".terminal-pane.active .terminal-host").first().click();
-  await desktop.page.keyboard.insertText(`printf '%s\\n' '${marker}'\n`);
-  await Promise.all([waitForOutput(desktop, marker), waitForOutput(mobile, marker)]);
+  await mobileHost.tap();
+  await mobile.page.evaluate(() => {
+    const textarea = document.querySelector(".terminal-pane.active .terminal-host textarea");
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("terminal textarea unavailable");
+    textarea.focus({ preventScroll: true });
+  });
+  await mobile.page.keyboard.insertText(`printf '%s\\n' '${marker}'`);
+  await mobile.page.keyboard.press("Enter");
+  await waitForOutput(mobile, marker);
+  const inputReadyState = await mobile.page.evaluate(() => {
+    const shell = document.querySelector(".terminal-pane.active .pane-shell");
+    const statusStyle = shell ? getComputedStyle(shell, "::after") : null;
+    return {
+      connection: shell?.dataset.connection || "",
+      connectionRetrying: shell?.dataset.connectionRetrying === "true",
+      renderReady: shell?.dataset.renderReady === "true",
+      hasPresentedFrame: shell?.dataset.hasPresentedFrame === "true",
+      statusOpacity: Number.parseFloat(statusStyle?.opacity || "0") || 0,
+    };
+  });
+  if (
+    inputReadyState.connectionRetrying
+    || !inputReadyState.renderReady
+    || !inputReadyState.hasPresentedFrame
+    || inputReadyState.statusOpacity > 0.01
+  ) {
+    throw new Error(`mobile PTY echoed input but remained visibly unhealthy: ${JSON.stringify(inputReadyState)}`);
+  }
+  assertNoFatalErrors();
 
   const resources = await localViewportResources(mobile);
   if (!resources.bundleLoaded || resources.sourceModulesLoaded.length > 0) {
@@ -284,11 +312,24 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error(`viewport changes replaced the Unified socket: ${JSON.stringify({ socketsBefore, socketsAfter })}`);
   }
 
+  const finalMarker = `AUTO_VIEWPORT_FINAL_${Date.now()}`;
+  await mobileHost.tap();
+  await mobile.page.evaluate(() => {
+    const textarea = document.querySelector(".terminal-pane.active .terminal-host textarea");
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("terminal textarea unavailable after viewport recovery");
+    textarea.focus({ preventScroll: true });
+  });
+  await mobile.page.keyboard.insertText(`printf '%s\\n' '${finalMarker}'`);
+  await mobile.page.keyboard.press("Enter");
+  await waitForOutput(mobile, finalMarker);
+
   assertNoFatalErrors();
   await eventLog({
     status: "pass",
     action: "terminal-viewport-real-environment",
     marker,
+    finalMarker,
+    inputReadyState,
     synthetic,
     keyboardOpen,
     keyboardClosed,

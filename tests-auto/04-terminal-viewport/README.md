@@ -9,7 +9,7 @@
 
 ## 触发条件
 
-移动窗口使用 iPhone User-Agent 进入 iOS visualViewport 分支。终端已有稳定画面后，聚焦 helper textarea，通过 synthetic visualViewport 高度变化模拟软键盘打开；随后 blur textarea 并恢复 visualViewport 高度，模拟软键盘收起。之后继续执行横竖屏和 portrait-to-portrait viewport 变化。
+移动窗口使用 iPhone User-Agent 进入 iOS visualViewport 分支。移动端等待真实终端 DOM 可见后按用户路径点击终端并输入唯一 marker，以 PTY 回显、稳定 presentation 和不可见状态点确认可用；不再把展示层 `data-connection` 恰好为 `open` 作为前置条件。随后聚焦 helper textarea，通过 synthetic visualViewport 高度变化模拟软键盘打开；blur textarea 并恢复 visualViewport 高度，模拟软键盘收起。横竖屏和 portrait-to-portrait viewport 变化完成后再输入第二个 marker，验证 logical stream 仍可用。跨设备输出同步与 resize 跨重连输入恢复统一由 `tests-auto/01-multi-device-resize-sync` 负责。
 
 ## 用户可见问题
 
@@ -27,6 +27,11 @@
 
 - 2026-09-04 使用当前工作区资源、真实 `debug@cloud.lazycat.lightos.entry` Provider/agent/PTY 和移动 Chrome 运行，产物为 `artifacts/2026-09-04T06-46-09-867Z/`。新增断言按预期失败：94 个键盘收起逐帧样本中有 6 帧状态点可见；这些帧均为 `connection=open`、`hasPresentedFrame=true`、`data-render-recovery=true`，伪元素计算后 opacity 为 `0.85`、颜色为 `rgb(148, 163, 184)`。同期 hold 可见且 `unsafe=0`，证明问题是状态点误显示而非 Canvas 中间帧或连接故障。
 - 前一次 `artifacts/2026-09-04T06-43-23-863Z/` 在进入键盘步骤前等待 desktop active pane `connection=open` 超时；截图显示终端内容已呈现，但第二窗口接入后该 pane 停在 `reconnecting`。该次属于测试机瞬时连接前置失败，不计作产品基线。
+- 2026-09-04 全量编排审计发现 `test-all.sh` 未注入本场景要求的 iPhone UA，`artifacts/2026-09-04T09-14-09-050Z/` 在平台前置断言停止；按 README 命令单独运行后于 `artifacts/2026-09-04T09-15-01-301Z/` 通过。
+- 随后的连续运行 `artifacts/2026-09-04T09-17-28-118Z/` 在 viewport 动作前的 desktop -> mobile 共享 marker 超时。trace 证明该失败属于 resize pending 跨 reconnect 后阻塞输入，由场景 01 承接；共享 marker 是本场景重复且过宽的依赖，不应继续作为 viewport 合同。
+- 本轮首次修复后运行 `artifacts/2026-09-04T09-47-29-434Z/` 再次命中旧的 `connection=open` 前置竞态：截图已显示移动终端 prompt，trace 中 active pane 已有 `renderReady=true` 且后续 resize owner 响应已完成，但 resume deadline 先把展示属性置为 `reconnecting`，导致用例等待内部瞬时状态满 60 秒而完全没有执行用户输入。该结果与本 README 早期记录的 `06-43-23-863Z` 同类，判定为过时前置断言。
+- 改为用户输入后，`artifacts/2026-09-04T09-52-15-815Z/` 中 marker 已真实回显，后续两个 resize claim/ACK 成功，active pane 为 `renderReady=true`、`hasPresentedFrame=true`、`data-connection-retrying=false`，状态点不可见；仅非权威展示属性 `data-connection=reconnecting` 未回写为 open。测试因此改为首尾两次 PTY 回显、活跃 Unified socket、稳定 presentation 和状态点不可见的组合合同，不把无用户影响的展示字符串当作传输失败，也不会掩盖不可输入、无法 resize 或 socket 失活。
+- `artifacts/2026-09-04T09-55-58-380Z/` 的最终 marker 超时发生时，连接为 `open`、presentation 稳定且所有 viewport resize ACK 已完成；原因是新增验证只 tap 了 host、未重新聚焦已在键盘收起步骤 blur 的 helper textarea。用例补齐与首次输入相同的显式 focus 后再发送最终 marker，不改变等待或产品断言。
 
 ## 已确认根因
 
@@ -42,6 +47,7 @@
 - `tests-auto/04-terminal-viewport/test.mjs`：从键盘 blur 前逐帧采样状态点计算样式，并拒绝健康已呈现终端上的可见状态点。
 - `tests-auto/04-terminal-viewport/README.md`：记录场景、基线、根因、方案和验证结果。
 - `tests-auto/05-terminal-output/README.md`：同步状态点的跨场景显示契约。
+- 当前测试边界调整：使用 mobile 自身点击、首尾输入、真实 PTY 回显、presentation/状态点和 Unified socket 验证可用，移除重复的 desktop -> mobile 输出同步与瞬时 `connection=open` 前置；`test-all.sh` 通过场景 profile 自动注入 iPhone UA。
 
 ## 验证预期
 
@@ -62,6 +68,8 @@
 - `git diff --check`：通过。
 - 2026-09-04 本次输入锁删除回归首次运行未注入 `WEBSHELL_MOBILE_USER_AGENT`，在进入场景动作前被平台前置断言拒绝，产物为 `artifacts/2026-09-04T07-10-37-430Z/`；这是运行命令缺少 README 必需变量，不是产品失败。
 - 使用下方完整命令重跑通过，产物为 `artifacts/2026-09-04T07-11-27-285Z/`；移动键盘 `inputViewportLock`、键盘展开/收起、最终 Canvas 和 Unified 连接均符合原场景断言。
+- 本轮更新后的用户结果合同于 `artifacts/2026-09-04T09-57-38-925Z/` 通过：viewport 前后两个移动端 marker 均由真实 PTY 回显；键盘打开 inset 为 `300px`，收起恢复 `0px`；键盘阶段 90 帧、orientation/fold 阶段 234 帧均 `unsafe=0`、可见健康状态点为 0。共观察到 4 个 current-device claim，最终 desktop/mobile Canvas 非透明采样分别为 `20326`/`21420`，Unified socket 前后均为 `created=1`、`active=1`。
+- 最终 16 场景回归产物 `artifacts/2026-09-04T11-12-42-657Z/` 再次通过首尾 PTY 输入、iPhone viewport、状态点、Canvas、claim 和 socket 门禁。
 
 ## 运行命令和环境变量
 

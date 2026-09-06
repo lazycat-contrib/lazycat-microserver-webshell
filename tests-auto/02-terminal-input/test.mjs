@@ -69,7 +69,11 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   const largeDone = `${marker}_LARGE_20480`;
   const dsrDone = `${marker}_DSR_DONE`;
 
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await terminalHost(desktop).waitFor({ state: "visible", timeout: 60_000 });
+  await desktop.page.waitForFunction(() => {
+    const shell = document.querySelector(".terminal-pane.active .pane-shell");
+    return shell?.dataset.renderReady === "true" && shell.dataset.hasPresentedFrame === "true";
+  }, null, { timeout: 60_000 });
   const beforeCanvas = await canvasSummary(desktop);
 
   await terminalHost(desktop).click();

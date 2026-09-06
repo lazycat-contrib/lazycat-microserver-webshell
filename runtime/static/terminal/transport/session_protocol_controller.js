@@ -160,6 +160,7 @@ export function createTerminalSessionProtocolController({
     session.pendingConnect = false;
     connectionEpoch += 1;
     session.connectionEpoch = connectionEpoch;
+    terminalResize.beginConnection?.(session, { connectionEpoch });
     terminalSessionConnection.clearReconnectTimer(session);
     session.terminalReplayGeneration = Number(session.terminalReplayGeneration || 0) + 1;
     session.replayFitGeneration = session.measuredFitGeneration;

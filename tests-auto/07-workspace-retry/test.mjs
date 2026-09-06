@@ -64,16 +64,24 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   ), { timeout: 60_000 });
   await desktop.page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
   await recoveredResponse;
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await desktop.page.waitForFunction(() => (
-    document.querySelector(".terminal-pane.active .terminal-host canvas:not(.terminal-frame-hold)")?.width > 0
-  ));
+  await desktop.page.waitForFunction(() => {
+    const shell = document.querySelector(".terminal-pane.active .pane-shell");
+    const canvas = shell?.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
+    return shell?.dataset.renderReady === "true"
+      && shell.dataset.hasPresentedFrame === "true"
+      && Number(canvas?.width || 0) > 0
+      && Number(canvas?.height || 0) > 0;
+  }, null, { timeout: 60_000 });
   await desktop.page.waitForTimeout(800);
 
   await desktop.page.unroute(/\/api\/workspace\?/);
   desktop.page.off("console", onConsole);
   desktop.fatalErrors = desktop.fatalErrors.filter((message) => !(
-    message.includes("HTTP 503 GET") && message.includes("/api/workspace?")
+    (message.includes("HTTP 503 GET") && message.includes("/api/workspace?"))
+    || (
+      message === "console error: Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+      && failedWorkspaceGets === 1
+    )
   ));
   if (failedWorkspaceGets !== 1) {
     throw new Error(`expected exactly one injected workspace failure, got ${failedWorkspaceGets}`);

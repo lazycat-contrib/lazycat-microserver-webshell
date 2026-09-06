@@ -267,6 +267,22 @@ const createHarness = ({ renderResult = true, presentationRetryLimit = 8 } = {})
   };
 };
 
+test("cancel hold cannot expose an uncommitted replay or ignore restoreReady false", () => {
+  const { controller, session, ready } = createHarness();
+  controller.installSession(session);
+  session.replayCommitted = false;
+  session.hasPresentedFrame = false;
+  controller.beginHold(session);
+  controller.cancelHold(session, { restoreReady: false });
+  assert.equal(session.renderReady, false);
+  assert.equal(ready.length, 0);
+  controller.cancelHold(session, { restoreReady: true, releaseFrame: true });
+  assert.equal(session.renderReady, false, "caller cannot override replay gate");
+  session.replayCommitted = true;
+  controller.ensure(session);
+  assert.equal(session.renderReady, true, "the completed first render must still become visible");
+});
+
 test("presentation controller holds the last frame until the current full render commits", () => {
   const { clock, controller, events, ready, session } = createHarness();
   session.hasPresentedFrame = true;
