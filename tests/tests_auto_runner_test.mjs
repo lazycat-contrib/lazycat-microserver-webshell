@@ -30,8 +30,9 @@ const runDry = (environment = {}) => execFileSync("bash", ["tests-auto/test-all.
 test("full browser runner applies required per-scenario profiles without silent skips", () => {
   const output = runDry();
   const profiles = output.trim().split(/\r?\n/).filter((line) => line.includes("[tests-auto] PROFILE"));
-  assert.equal(profiles.length, 17);
+  assert.equal(profiles.length, 18);
   assert.ok(profiles.some((line) => line.includes("17-client-tab-replay-recovery")));
+  assert.ok(profiles.some((line) => line.includes("18-cross-device-tab-sync")));
   assert.match(
     profiles.find((line) => line.includes("04-terminal-viewport")) || "",
     /mobile_ua=Mozilla\/5\.0 \(iPhone;/,
@@ -43,6 +44,6 @@ test("full browser runner applies required per-scenario profiles without silent 
   for (const line of profiles.filter((value) => !value.includes("11-service-worker-retirement"))) {
     assert.match(line, /static=\/tmp\/current-webshell-build/);
   }
-  assert.match(output, /\[tests-auto\] 17 case profile\(s\) ready/);
+  assert.match(output, /\[tests-auto\] 18 case profile\(s\) ready/);
   assert.doesNotMatch(output, /case\(s\) passed/);
 });

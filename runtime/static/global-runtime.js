@@ -1138,6 +1138,8 @@ export function startGlobalRuntime() {
     performanceNow: () => performanceTaskNow(),
     measureTask: (name, task) => measurePerformanceTask(name, task),
     getTabCount: () => tabs.size,
+    getStateRevision: () => workspaceStateApply?.getRevision() || 0,
+    getMutationState: () => workspaceAPI.getMutationState(),
     lifecycleOptions: {
       windowObject: window,
       navigatorObject: navigator,
@@ -1436,6 +1438,8 @@ export function startGlobalRuntime() {
     getActiveName,
     getInstanceGeneration: getActiveGeneration,
     getActivityURL: (name) => workspaceActivityURL(name),
+    syncPaneMembership: (observation) => workspaceRefresh.syncMembership(observation),
+    getMutationState: () => workspaceAPI.getMutationState(),
     isCurrentInstanceRequest: (name, generation) => isCurrentInstanceRequest(name, generation),
     ensureResponseSelector: (state, name, label) => ensureResponseSelector(state, name, label),
     observeServerGeometry: (pane, state) => terminalResize?.observeServerGeometry(pane, state),
@@ -1955,6 +1959,7 @@ export function startGlobalRuntime() {
 
   workspaceStateApply = createWorkspaceStateApplyController({
     getTabs: () => tabs,
+    getActiveTabId,
     getActiveName,
     getActiveGeneration,
     isCurrentRequest: (name, generation) => isCurrentInstanceRequest(name, generation),
@@ -1975,6 +1980,7 @@ export function startGlobalRuntime() {
     renderTabLabel: (tab) => renderTabLabel(tab),
     renderTabLayout: (tab) => workspaceLayoutView.renderTabLayout(tab),
     clearTabButtons: () => workspaceTabView.clearTabButtons(),
+    syncTabButtonOrder: (orderedTabs) => workspaceTabView.syncTabButtonOrder(orderedTabs),
     applyRecentTabIds: (ids, options) => applyRecentTabIds(ids, options),
     loadStoredRecentTabIds: (name) => loadStoredRecentTabIds(name),
     getRecentTabIds: () => workspaceTabNavigation.getRecentTabIds(),

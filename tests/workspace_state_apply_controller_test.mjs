@@ -68,6 +68,7 @@ test("workspace state apply reconciles authoritative tabs and panes in applying 
     getTabs: () => tabs,
     getActiveName: () => "demo",
     getActiveGeneration: () => 4,
+    getActiveTabId: () => "tab-1",
     isCurrentRequest: (name, generation) => name === "demo" && generation === 4,
     ensureResponseSelector: () => calls.push(["selector"]),
     responseSelector: (state) => state.selector,
@@ -172,4 +173,66 @@ test("workspace state apply lifecycle cancels late frames on dispose", () => {
   windowObject.flush();
   assert.equal(calls, 0);
   assert.equal(lifecycle.dispose(), false);
+});
+
+test("passive membership sync preserves current tab, pane, buttons, layout and pending input", () => {
+  const windowObject = createFrameWindow();
+  const first = { id: "one", name: "demo", socket: {}, pendingInput: ["unfinished"] };
+  const second = { id: "two", name: "demo", socket: {} };
+  const layout = { type: "split", children: [{ type: "leaf", paneId: "one" }, { type: "leaf", paneId: "two" }] };
+  const button = {};
+  const tab = { id: "tab-1", label: "first", activePaneId: "one", layout, button, panes: new Map([["one", first], ["two", second]]) };
+  const tabs = new Map([[tab.id, tab]]);
+  const calls = [];
+  let controller;
+  controller = createWorkspaceStateApplyController({
+    getTabs: () => tabs, getActiveName: () => "demo", getActiveTabId: () => "tab-1",
+    responseSelector: (state) => state.selector,
+    createTab: (options) => { const next = { id: options.id, panes: new Map(), button: {} }; tabs.set(next.id, next); return next; },
+    closeTab: (id) => { assert.equal(controller.isApplying(), true); tabs.delete(id); },
+    createPaneSession: (next, name, options) => next.panes.set(options.id, { id: options.id, name, socket: {} }),
+    clearTabButtons: () => calls.push("clear-buttons"), recreateTabButton: () => calls.push("recreate"),
+    renderTabLayout: (next) => calls.push(`layout:${next.id}`),
+    setActiveTab: () => calls.push("activate"), resizeActiveTabForCurrentDevice: () => calls.push("resize"),
+    applyRecentTabIds: () => calls.push("recent"), clearRestartTabForReload: () => calls.push("clear-restart"),
+    syncTabButtonOrder: (ordered) => calls.push(ordered.map((next) => next.id)),
+    flushPendingMembershipRefresh: () => assert.equal(controller.isApplying(), false),
+    lifecycleOptions: { windowObject },
+  });
+  const firstState = { id: tab.id, label: tab.label, active_pane_id: "two", layout, panes: [{ id: "one" }, { id: "two" }] };
+  const remote = { id: "tab-remote", active_pane_id: "three", layout: { type: "leaf", paneId: "three" }, panes: [{ id: "three", cols: 80, rows: 24 }] };
+  controller.apply({ selector: "demo", tabs: [firstState, remote], active_tab_id: remote.id, recent_tab_ids: [remote.id, tab.id] }, { preserveLocalState: true });
+  assert.equal(tabs.get(tab.id), tab);
+  assert.equal(tab.button, button);
+  assert.equal(tab.layout, layout);
+  assert.equal(tab.panes.get("one"), first);
+  assert.equal(tab.activePaneId, "one", "remote active pane cannot steal local focus");
+  assert.deepEqual(first.pendingInput, ["unfinished"]);
+  assert.deepEqual(calls, ["layout:tab-remote", ["tab-1", "tab-remote"]]);
+  assert.equal(windowObject.size(), 0, "unrelated membership must not schedule resize/activation");
+  assert.equal(controller.getRevision(), 1);
+  controller.apply({ selector: "demo", tabs: [firstState] }, { preserveLocalState: true });
+  assert.equal(tabs.has(remote.id), false);
+  assert.equal(tabs.get(tab.id), tab);
+  assert.equal(windowObject.size(), 0);
+});
+
+test("background membership updates retain valid pending work for the current tab", () => {
+  const windowObject = createFrameWindow();
+  const tab = { id: "tab-1", activePaneId: "one", layout: { type: "leaf", paneId: "one" }, panes: new Map([["one", { id: "one", socket: {} }]]) };
+  const tabs = new Map([[tab.id, tab]]);
+  const calls = [];
+  const controller = createWorkspaceStateApplyController({
+    getTabs: () => tabs, getActiveName: () => "demo", getActiveTabId: () => tab.id,
+    createTab: (options) => { const next = { id: options.id, panes: new Map() }; tabs.set(next.id, next); return next; },
+    createPaneSession: (next, name, options) => next.panes.set(options.id, { id: options.id, name, socket: {} }),
+    resizeActiveTabForCurrentDevice: () => calls.push("resize"),
+    connectPendingSessionsForTab: (next) => calls.push(next.id),
+    lifecycleOptions: { windowObject },
+  });
+  const first = { id: tab.id, active_pane_id: "one", layout: tab.layout, panes: [{ id: "one" }] };
+  controller.apply({ tabs: [first] });
+  controller.apply({ tabs: [first, { id: "tab-2", panes: [{ id: "two" }], active_pane_id: "two" }] }, { preserveLocalState: true });
+  windowObject.flush();
+  assert.deepEqual(calls, ["resize", "tab-1"], "unrelated background sync cannot cancel the current tab's initial fit/connect");
 });

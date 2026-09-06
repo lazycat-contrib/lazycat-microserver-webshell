@@ -64,6 +64,46 @@ test("workspace API builds sized URLs and applies current action responses", asy
   await assert.rejects(api.fetchState(), /disposed/);
 });
 
+test("workspace API exposes an immutable mutation fence spanning successful and failed actions", async () => {
+  let reply;
+  const api = createWorkspaceAPI({
+    windowObject: { location: { href: "https://webshell.test/app/" } }, getActiveName: () => "demo",
+    fetchImpl: () => new Promise((resolve) => { reply = resolve; }),
+  });
+  const before = api.getMutationState();
+  const request = api.postAction("create_tab");
+  assert.equal(api.getMutationState().pending, true);
+  assert.ok(api.getMutationState().version > before.version);
+  assert.equal(before.pending, false);
+  assert.ok(Object.isFrozen(before));
+  reply(jsonResponse({ selector: "demo", tabs: [] }));
+  await request;
+  const completed = api.getMutationState();
+  assert.equal(completed.pending, false);
+  const failed = api.postAction("close_tab");
+  reply(jsonResponse({}, { ok: false, status: 500, text: "failed" }));
+  await assert.rejects(failed, /failed/);
+  assert.equal(api.getMutationState().pending, false);
+  assert.ok(api.getMutationState().version > completed.version);
+});
+
+test("an old target's pending action cannot block the newly selected workspace", async () => {
+  let active = "first";
+  let reply;
+  const api = createWorkspaceAPI({ windowObject: { location: { href: "https://webshell.test/" } },
+    getActiveName: () => active, getActiveGeneration: () => 1,
+    isCurrentRequest: (name) => name === active,
+    fetchImpl: () => new Promise((resolve) => { reply = resolve; }),
+  });
+  const action = api.postAction("create_tab");
+  assert.equal(api.getMutationState().pending, true);
+  active = "second";
+  const before = api.getMutationState();
+  assert.equal(before.pending, false);
+  reply(jsonResponse({ selector: "first" })); await action;
+  assert.deepEqual(api.getMutationState(), before, "retired action completion cannot invalidate new target progress");
+});
+
 test("workspace API rejects current selector mismatches and ignores stale responses", async () => {
   let activeName = "one@owner";
   let generation = 1;

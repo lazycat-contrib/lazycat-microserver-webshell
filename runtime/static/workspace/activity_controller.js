@@ -17,6 +17,8 @@ export function createWorkspaceActivityController({
   isCurrentInstanceRequest = () => true,
   ensureResponseSelector = () => {},
   observeServerGeometry = () => {},
+  syncPaneMembership = () => Promise.resolve(false),
+  getMutationState = () => ({ version: 0, pending: false }),
   recoverSessions = () => {},
   refreshTabAutoLabel = () => {},
   updateMobileActiveTabTitle = () => {},
@@ -31,6 +33,7 @@ export function createWorkspaceActivityController({
   let disposed = false;
   let activityRefreshTimer = 0;
   let activityRefreshDelayTimer = 0;
+  let activityRequestSequence = 0;
 
   const isInactive = () => disposed || isDisposed();
 
@@ -81,12 +84,14 @@ export function createWorkspaceActivityController({
     if (!requestName) {
       return [];
     }
+    const requestSequence = ++activityRequestSequence;
+    const mutation = getMutationState();
     const response = await fetchFunction(getActivityURL(requestName), { cache: "no-store" });
     if (!response.ok) {
       throw new Error(await response.text() || `Activity request failed (${response.status})`);
     }
     const state = await response.json();
-    if (isInactive() || !isCurrentInstanceRequest(requestName, generation)) {
+    if (isInactive() || requestSequence !== activityRequestSequence || !isCurrentInstanceRequest(requestName, generation)) {
       return [];
     }
     ensureResponseSelector(state, requestName, "Activity");
@@ -99,6 +104,22 @@ export function createWorkspaceActivityController({
       }
       throw new Error(state.error);
     }
+    // Activity already contains the authoritative pane membership. Only a
+    // complete, valid list can justify fetching a structural workspace update.
+    if (!mutation.pending && !getMutationState().pending && mutation.version === getMutationState().version
+      && Array.isArray(state?.panes) && state.panes.every((pane) => typeof pane?.id === "string" && pane.id.trim())) {
+      const remoteIDs = new Set(state.panes.map((pane) => pane.id));
+      const localIDs = new Set();
+      for (const tab of getTabs() || []) {
+        for (const pane of tab?.panes?.values?.() || []) {
+          if (!pane.closed && (!pane.name || pane.name === requestName)) localIDs.add(pane.id);
+        }
+      }
+      if (remoteIDs.size === state.panes.length && (remoteIDs.size !== localIDs.size || [...remoteIDs].some((id) => !localIDs.has(id)))) {
+        await syncPaneMembership({ instanceName: requestName, generation, paneIDs: [...remoteIDs].sort() });
+      }
+    }
+    if (isInactive() || !isCurrentInstanceRequest(requestName, generation)) return [];
     updateDocumentTitle();
     return state?.panes || [];
   };
@@ -173,6 +194,7 @@ export function createWorkspaceActivityController({
       return false;
     }
     disposed = true;
+    activityRequestSequence += 1;
     stopActivityRefresh();
     return true;
   };

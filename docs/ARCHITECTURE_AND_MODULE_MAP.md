@@ -159,6 +159,8 @@ Browser
 | 附件和文件管理 | `runtime/static/attachments/index.js` | [`attachments/README.md`](../runtime/static/attachments/README.md) | 文件选择、剪贴板导入、上传、远端浏览和下载 |
 | 服务转发 | `runtime/static/service_forwarding/index.js` | [`service_forwarding/README.md`](../runtime/static/service_forwarding/README.md) | 发布记录、服务转发编辑、部署和删除 |
 
+跨设备 tab 成员同步仍归 workspace：既有 activity 的完整 pane 集合变化 → `refresh_controller.syncMembership()` 按需 GET → `state_apply_controller.apply(state, { preserveLocalState:true })` 增量同步。API owner 提供本地 action fence，state apply owner 提供应用 revision；refresh 不覆盖期间发生的本地操作、新快照或新 target。activity 不创建 tab，refresh 不直接操作 DOM，global runtime 只接线；tab view 保持已有按钮实例，终端仍由原 session/transport owner 管理。没有新增 WebSocket 或 polling timer，也不复用 `workspace_generation` 作为每次成员变更计数。单独改名/排序不在这个 pane 集合信号的保证范围内。
+
 ### 3.2 终端聚合模块
 
 终端总体边界和普通容器/client target 差异：
@@ -261,6 +263,7 @@ resize 与 transport 的重连契约是：transport 拥有 logical `connectionEp
 
 | 场景目录 | 覆盖范围 |
 | --- | --- |
+| [`tests-auto/18-cross-device-tab-sync/`](../tests-auto/18-cross-device-tab-sync/) | 复用 activity 发现另一设备新增/关闭 tab；保留本端焦点、DOM、Canvas、输出与物理连接；无变化不额外拉取 workspace |
 | [`tests-auto/01-multi-device-resize-sync/`](../tests-auto/01-multi-device-resize-sync/) | PC/移动端共享 pane、尺寸 claim、PTY 输出同步，以及 resize 在途时物理断线后的 claim/输入恢复 |
 | [`tests-auto/02-terminal-input/`](../tests-auto/02-terminal-input/) | PC/移动端终端输入和输入状态 |
 | [`tests-auto/03-terminal-ime/`](../tests-auto/03-terminal-ime/) | 移动端 IME、composition 和输入法交互 |
