@@ -185,13 +185,7 @@ export function createTerminalSessionConnectionController({
         );
         return false;
       }
-      const attachStartedAt = Number(session.attachStartedAt || 0);
-      const attachTimeout = Number(session.attachReadyTimeoutMs || 0) || attachReadyTimeoutMs;
-      if (
-        !isReplayCommitted(session)
-        && attachStartedAt > 0
-        && checkedAt - attachStartedAt > attachTimeout
-      ) {
+      if (lifecycle.checkAttachReady(session, socket)) {
         closeSocketForReconnect(
           session,
           socket,

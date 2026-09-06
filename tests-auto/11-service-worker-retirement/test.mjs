@@ -100,21 +100,20 @@ const createUpgradeFixture = async () => {
 };
 
 const waitForTerminal = async (page) => {
-  await page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
   await page.waitForFunction(() => {
+    const shell = document.querySelector(".terminal-pane.active .pane-shell");
     const canvas = document.querySelector(".terminal-pane.active .terminal-host canvas:not(.terminal-frame-hold)");
-    return canvas instanceof HTMLCanvasElement && canvas.width > 0 && canvas.height > 0;
-  }, null, { timeout: 30_000 });
+    return shell?.dataset.renderReady === "true"
+      && shell.dataset.hasPresentedFrame === "true"
+      && canvas instanceof HTMLCanvasElement
+      && canvas.width > 0
+      && canvas.height > 0;
+  }, null, { timeout: 60_000 });
 };
 
 export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   if (config.localStaticDir) {
-    await eventLog({
-      status: "info",
-      action: "service-worker-retirement-skipped",
-      reason: "WEBSHELL_LOCAL_STATIC_DIR blocks Service Worker; run this case without local static mapping",
-    });
-    return;
+    throw new Error("WEBSHELL_LOCAL_STATIC_DIR must be empty because this required scenario exercises Service Worker lifecycle");
   }
 
   const { desktop, mobile } = states;

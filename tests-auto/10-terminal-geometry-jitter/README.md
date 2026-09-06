@@ -54,6 +54,9 @@ resize controller 分别维护 interactive 与 metrics source；二者重叠时�
 - 完整 Node 行为测试：`node --test tests/*_test.mjs`，422/422 通过；相关 Go/架构 guard 定向运行通过。
 - 真实 `05-terminal-output`、`12-overview-preview-persistence` 和 `13-split-divider-render-isolation` 分别在 `tests-auto/05-terminal-output/artifacts/2026-09-04T03-52-47-179Z/`、`tests-auto/12-overview-preview-persistence/artifacts/2026-09-04T03-54-36-618Z/`、`tests-auto/13-split-divider-render-isolation/artifacts/2026-09-04T03-53-21-519Z/` 通过，确认 replay/大输出原子提交、最终预览持久化和分屏 live resize 没有回归。
 - 移动端 DPR=3 重跑 `artifacts/2026-09-04T04-01-01-122Z/` 通过：字号、行高、移动 Zoom 的 `visibleHold=0`，移动 live Canvas backing/CSS 比例始终为 3，tab 激活仍有 14 个安全 hold 样本。第一次 DPR=3 尝试 `artifacts/2026-09-04T03-59-13-171Z/` 未进入操作阶段：desktop 已有稳定 presentation、mobile 正常，但通用双窗口运行器的 desktop 连接标签停在 `reconnecting`，旧前置选择器超时；原样重跑后通过，因此记为环境/多设备状态标签波动，不计产品失败。
+- 本轮完整回归 `artifacts/2026-09-04T10-30-26-693Z/` 再次命中同一旧前置：desktop active pane 已 `renderReady=true`、`hasPresentedFrame=true`、Canvas 非空，mobile 同 pane 为 `connection=open`，desktop 仅被 resume deadline 留下 `data-connection=reconnecting` 且 `data-connection-retrying=false`。用例尚未执行任何字号/行高/viewport 动作，判定为过时展示属性断言，不是几何产品失败。
+
+当前测试边界调整为等待 active terminal host 可见，并同时要求稳定 presentation 与非空 Canvas；之后原有字号、行高、移动 Zoom、viewport、tab 激活的逐帧 live/hold/anchor/收敛断言全部保留。这样不会把真实未就绪页面放行，也不再把非权威的 `data-connection` 展示字符串当成几何失败。
 
 ## 运行命令和环境变量
 
@@ -71,4 +74,4 @@ WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static" TEST_FOREGROUND=0 \
 
 本场景使用真实 headless Chrome 和真实终端链路，不替代用户设备上的前台视觉判断。字体族切换不在本次 live 范围内，因为新字体资源加载与 fallback 替换仍可能需要原子保护。
 
-仓库级 `go test ./...` 仍受既有 `TestRuntimeTerminalCanvasResidueGuard` 阻塞：该 guard 要求 `object-fit: none`，当前高 DPI hold 契约和样式使用 `object-fit: contain`。本次没有修改这项无关断言；所有受影响的 metrics/settings/resize/presentation/架构定向 Go guard 均已通过。
+本轮前置修正后独立通过，并在最终全量的 `artifacts/2026-09-04T11-14-53-414Z/` 再次通过字号、行高、移动 Zoom、viewport、tab 激活和逐帧 live/hold 几何门禁。当前 `node --test tests/*_test.mjs` 为 437/437 通过，`go test ./... -count=1` 全部通过；此前记录的 Canvas residue guard 阻塞已经过时。

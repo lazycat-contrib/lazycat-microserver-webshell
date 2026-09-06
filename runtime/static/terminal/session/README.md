@@ -33,7 +33,7 @@ controller 公开：
 - `session_controller.js` 唯一持有 pane ID 序列，并组合 state 与 lifecycle。
 - `session_state.js` 只创建初始状态；每次调用都生成独立数组、Promise 和子控制器。
 - `session_lifecycle.js` 通过模块私有 `WeakMap`/`WeakSet` 持有 cleanup 与 disposed 状态。
-- transport、replay 和 `client:` 兼容历史字段暂时保持扁平；input、output、resize 和 presentation 字段虽然仍由 session state 提供初值，但只允许对应 controller 修改，其他模块必须使用公开 API。
+- transport、replay 和 `client:` 兼容历史字段暂时保持扁平；input、output、resize 和 presentation 字段虽然仍由 session state 提供初值，但只允许对应 controller 修改，其他模块必须使用公开 API。`resizeConnectionEpoch` 与 `resizeConnectionTransitionPending` 也只由 resize controller 修改；session state 仅把它们初始化为无连接状态，transport 不直接写入。
 
 禁止其他模块直接修改 session lifecycle 的私有状态，也禁止重新在 `global-runtime.js` 建立 session cleanup 数组或复制局部销毁逻辑。
 
@@ -69,7 +69,7 @@ controller 公开：
 
 - 内部通过 `terminal/history/index.js`、`terminal/resize/index.js` 和 `terminal/rendering/index.js` 依赖现有 replay、resize 与 render snapshot API。
 - DOM、Ghostty 和各责任域清理函数由调用方显式注入，模块不反向读取应用全局状态。
-- 行为测试：`terminal_session_controller_test.mjs`、`terminal_session_installation_controller_test.mjs`（含原生 paste 转发、presentation-ready 副作用及 closed/dispose guard）、`terminal_startup_error_controller_test.mjs`、`app_paste_controller_test.mjs`。
+- 行为测试：`terminal_session_controller_test.mjs`、`terminal_session_installation_controller_test.mjs`（含原生 paste 转发、presentation-ready 副作用及 closed/dispose guard）、`terminal_startup_error_controller_test.mjs`、`terminal_session_protocol_controller_test.mjs`（含 connection epoch 到 resize transition 的接线）、`app_paste_controller_test.mjs`。
 - 静态边界：`TestRuntimeTerminalSessionModuleBoundary`。
 - 历史 guard：对应 `tests-auto` 场景 README、终端 history/transport 测试以及当前模块 README 中记录的 cursor、Unified、历史回放和 last-known-good frame 契约。
 

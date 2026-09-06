@@ -215,8 +215,15 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   const { desktop, mobile } = states;
   const page = desktop.page;
   const host = activeHost(page);
-  await page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await page.waitForFunction(() => document.querySelector(".terminal-pane.active .terminal-host canvas:not(.terminal-frame-hold)")?.width > 0, { timeout: 30_000 });
+  await host.waitFor({ state: "visible", timeout: 60_000 });
+  await page.waitForFunction(() => {
+    const shell = document.querySelector(".terminal-pane.active .pane-shell");
+    const canvas = shell?.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
+    return shell?.dataset.renderReady === "true"
+      && shell.dataset.hasPresentedFrame === "true"
+      && Number(canvas?.width || 0) > 0
+      && Number(canvas?.height || 0) > 0;
+  }, null, { timeout: 30_000 });
   await page.waitForTimeout(700);
   await installGeometrySampler(page);
 

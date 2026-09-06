@@ -157,8 +157,17 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required so the real environment loads the current workspace frontend");
   }
   const { desktop, mobile } = states;
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await mobile.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await Promise.all([desktop, mobile].map(async (state) => {
+    await state.page.locator(".terminal-pane.active .terminal-host").first().waitFor({ state: "visible", timeout: 60_000 });
+    await state.page.waitForFunction(() => {
+      const shell = document.querySelector(".terminal-pane.active .pane-shell");
+      const canvas = shell?.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
+      return shell?.dataset.renderReady === "true"
+        && shell.dataset.hasPresentedFrame === "true"
+        && Number(canvas?.width || 0) > 0
+        && Number(canvas?.height || 0) > 0;
+    }, null, { timeout: 60_000 });
+  }));
 
   const marker = `AUTO_IME_${Date.now()}`;
   const compositionCommand = `printf '%s\\n' '${marker}_COMPOSITION'`;

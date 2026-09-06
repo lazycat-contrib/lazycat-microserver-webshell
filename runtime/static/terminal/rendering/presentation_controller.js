@@ -421,10 +421,18 @@ export function createTerminalPresentationController({
       releaseFrame,
       ...canvasDetails(session),
     });
-    if (releaseFrame) {
+    const canRestore = restoreReady && session.hasPresentedFrame && renderAllowed(session)
+      && isPaneVisible(session) && isPaneMeasurable(session) && canvasMatchesExpectedSize(session)
+      && !session.fullRenderPending
+      && session.presentedFitGeneration === session.measuredFitGeneration
+      && session.presentedReplayGeneration === session.terminalReplayGeneration
+      && session.presentedContentGeneration === session.terminalContentGeneration;
+    if (releaseFrame && canRestore) {
       releaseHold(session);
     }
+    if (canRestore) {
       setReady(session, true, { reason: "cancel_hold_restore" });
+    }
     return true;
   };
 

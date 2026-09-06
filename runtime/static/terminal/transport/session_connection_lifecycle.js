@@ -15,9 +15,11 @@ export function createTerminalSessionConnectionLifecycle({
   resumeProbeTimeoutMs = 1500,
   connectTimeoutMs = 12 * 1000,
   attachReadyTimeoutMs = 8 * 1000,
+  attachMaxDurationMs = 60 * 1000,
   agentPrepareTimeoutMs = 45 * 1000,
 } = {}) {
   const sessions = new Set();
+  const attachWatches = new WeakMap();
   let disposed = false;
 
   const clearTimeoutField = (session, field) => {
@@ -47,7 +49,10 @@ export function createTerminalSessionConnectionLifecycle({
   };
 
   const clearSocketConnectTimer = (session) => clearTimeoutField(session, "socketConnectTimer");
-  const clearAttachReadyTimer = (session) => clearTimeoutField(session, "attachReadyTimer");
+  const clearAttachReadyTimer = (session) => {
+    if (session) attachWatches.delete(session);
+    return clearTimeoutField(session, "attachReadyTimer");
+  };
   const clearSocketResumeProbeTimer = (session) => clearTimeoutField(session, "resumeProbeTimer");
 
   const clearConnectionTimers = (session) => {
@@ -170,25 +175,73 @@ export function createTerminalSessionConnectionLifecycle({
     return true;
   };
 
+  const watchIsCurrent = (session, watch) => Boolean(
+    !disposed && session && !session.closed && watch
+    && attachWatches.get(session) === watch && session.socket === watch.socket
+    && Number(session.connectionEpoch || 0) === watch.connectionEpoch
+  );
+
+  const inspectAttach = (session, watch, checkedAt) => {
+    if (!watchIsCurrent(session, watch) || isReplayCommitted(session)) return false;
+    // Only validated history cursor advancement counts. Ping/focus/resize must
+    // not keep a replay with no usable output alive indefinitely.
+    const received = session.receivedHistoryCursor ?? 0n;
+    const applied = session.appliedHistoryCursor ?? 0n;
+    const phase = String(session.replayController?.phase || "");
+    const advancedPhase = phase !== watch.phase && ["replaying", "awaiting_commit"].includes(phase);
+    if (advancedPhase || received > watch.received || applied > watch.applied) {
+      watch.lastProgressAt = checkedAt;
+      watch.received = received;
+      watch.applied = applied;
+    }
+    watch.phase = phase;
+    return checkedAt >= watch.deadline || checkedAt - watch.lastProgressAt >= watch.idleTimeout;
+  };
+
+  const checkAttachReady = (session, currentSocket) => {
+    const watch = attachWatches.get(session);
+    return currentSocket === watch?.socket && inspectAttach(session, watch, now());
+  };
+
   const startAttachReadyTimer = (session, currentSocket, timeoutMs = attachReadyTimeoutMs) => {
     if (disposed || !session) {
       return false;
     }
+    const previousWatch = attachWatches.get(session);
+    const preserveDeadline = watchIsCurrent(session, previousWatch);
     clearAttachReadyTimer(session);
-    session.attachStartedAt = now();
+    session.attachStartedAt = preserveDeadline ? previousWatch.startedAt : now();
     session.attachReadyTimeoutMs = timeoutMs;
     sessions.add(session);
-    session.attachReadyTimer = windowObject?.setTimeout?.(() => {
-      session.attachReadyTimer = 0;
-      if (disposed || session.socket !== currentSocket || isReplayCommitted(session)) {
-        return;
-      }
-      closeSocketForReconnect(
-        session,
-        currentSocket,
-        `Terminal attach timed out before replay complete: ${session.name}/${session.id}`,
-      );
-    }, timeoutMs) || 0;
+    const watch = {
+      socket: currentSocket,
+      startedAt: session.attachStartedAt,
+      connectionEpoch: Number(session.connectionEpoch || 0),
+      received: session.receivedHistoryCursor ?? 0n,
+      applied: session.appliedHistoryCursor ?? 0n,
+      phase: String(session.replayController?.phase || ""),
+      lastProgressAt: session.attachStartedAt,
+      idleTimeout: timeoutMs,
+      deadline: preserveDeadline ? previousWatch.deadline : session.attachStartedAt + Math.max(timeoutMs, attachMaxDurationMs),
+    };
+    attachWatches.set(session, watch);
+    const schedule = (checkedAt) => {
+      const dueAt = Math.min(watch.deadline, watch.lastProgressAt + watch.idleTimeout);
+      session.attachReadyTimer = windowObject?.setTimeout?.(() => {
+        if (!watchIsCurrent(session, watch)) return;
+        session.attachReadyTimer = 0;
+        if (isReplayCommitted(session)) { attachWatches.delete(session); return; }
+        const at = Math.max(now(), dueAt);
+        if (inspectAttach(session, watch, at)) {
+          attachWatches.delete(session);
+          closeSocketForReconnect(session, currentSocket,
+            `Terminal attach timed out before replay complete: ${session.name}/${session.id}`);
+        } else {
+          schedule(at);
+        }
+      }, Math.max(1, dueAt - checkedAt)) || 0;
+    };
+    schedule(now());
     return true;
   };
 
@@ -211,6 +264,7 @@ export function createTerminalSessionConnectionLifecycle({
 
   return Object.freeze({
     clearAttachReadyTimer,
+    checkAttachReady,
     clearConnectionTimers,
     clearReconnectTimer,
     clearSocketConnectTimer,

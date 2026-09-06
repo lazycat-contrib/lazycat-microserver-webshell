@@ -99,9 +99,11 @@ node tests-auto/run-playwright.mjs tests-auto/13-split-divider-render-isolation/
 - `node --test tests/*_test.mjs`：419/419 通过。
 - 受影响真实场景均以本地 `runtime/static` 和真实 Provider/agent/PTY/WebSocket 通过：`01`（`artifacts/2026-09-04T03-11-06-934Z/`）、`04`（`artifacts/2026-09-04T03-14-07-722Z/`）、`05`（`artifacts/2026-09-04T03-14-55-262Z/`）、`08`（`artifacts/2026-09-04T03-15-36-259Z/`）、`09`（`artifacts/2026-09-04T03-16-09-921Z/`）、`10`（`artifacts/2026-09-04T03-17-01-195Z/`）和 `12`（`artifacts/2026-09-04T03-17-47-227Z/`）。场景 04 第一次运行漏传其 README 要求的 iPhone User-Agent，停在操作前连接门槛；按场景标准命令补齐环境后通过。
 - 受影响 Go/架构 guard（含新的 live geometry wiring、同 epoch retry 与 overview capture 门禁）通过：`go test -run '^(TestTerminalResizeControllerBehavior|TestTerminalResizeSchedulerBehavior|TestRuntimeResizeEpochAckGuard|TestRuntimeCrossClientResizeDoesNotAutoReclaim|TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs|TestRuntimeWorkspaceModuleBoundary|TestRuntimeGlobalRuntimeOwnsApplicationLifecycle|TestRuntimeTerminalPresentationModuleBoundary|TestRuntimeTerminalRendererAdapterModuleBoundary|TestRuntimeTerminalOverviewModuleBoundary|TestRuntimeStaticModulesAreGroupedByResponsibility)$' ./...`。仓库级 `go test ./...` 除下述既有 Canvas residue guard 外均执行完成。
+- 本轮预检 `artifacts/2026-09-04T10-33-09-833Z/` 完成全部真实拖拽与像素/响应性/连接断言后，仅因 source pane 的 `live_geometry_complete` 计数为 0 失败。该 pane 的持续输出把诊断环形缓冲压缩到最近 96 条，早于约 16.6 秒的事件均被淘汰；quiet pane 仍保留 begin/end/complete。source pane 最新 `resize_server_geometry_observed` 明确为 `sizeClaimed=true`、`resizeAckPending=false`、fence/hold=false、`renderReady=true`，证明事务已经完成。
+- 健康门禁因此改为两 pane 最新 resize 状态必须 settled；`live_geometry_complete` 保留为诊断计数，不再要求它必须幸存在有界 timeline 中。`resize_ack_stale`、`presentation_retry_exhausted`、最终宽度、Canvas 隔离、live 跟随、RAF、resize frame 上限和唯一 socket 断言保持不变。
 
 ## 已知限制
 
 本场景验证测试机真实 Provider/agent/PTY/Unified WebSocket 与 headless 桌面 Chrome 的左右分屏；未运行前台可视 Chrome 或独立物理设备人工验证。上下分屏复用同一布局控制器和 resize/presentation 链路，但本用例不单独覆盖触摸拖拽；若后续出现方向或触摸专属问题，应扩展本目录而不是建立近似重复场景。
 
-仓库级 `go test ./...` 仍会在与本次改动无关的既有 `TestRuntimeTerminalCanvasResidueGuard` 失败：guard 要求 `object-fit: none`，而当前干净 HEAD 的 `runtime/static/style.css` 及 rendering README 明确采用高 DPI 修复后的 `object-fit: contain`（提交 `22cdd45` 改了样式但没有同步该旧 guard）。本次没有通过修改断言或回退高 DPI 行为绕过失败；受影响的 Go 测试已用上面的定向命令通过。
+最终实现改用运行器记录的协议响应证明两个 pane 的最终 claim 均获得同 epoch/geometry `resize-applied`。独立预检及最终全量 `artifacts/2026-09-04T11-16-04-028Z/` 均通过；当前 `go test ./... -count=1` 全部通过，此前记录的 Canvas residue guard 阻塞已经过时。

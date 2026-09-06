@@ -122,6 +122,81 @@ test("attach readiness timeout is owned only by replay completion", () => {
   assert.match(closes[0][2], /attach timed out/);
 });
 
+test("attach watchdog tolerates cursor progress but has an absolute recovery deadline", () => {
+  const clock = createClock();
+  const closes = [];
+  const socket = createSocket();
+  const session = { socket, name: "target-1", id: "pane-1", connectionEpoch: 1, receivedHistoryCursor: 0n, appliedHistoryCursor: 0n };
+  const lifecycle = createTerminalSessionConnectionLifecycle({
+    windowObject: clock.windowObject, now: clock.now, isReplayCommitted: () => false,
+    closeSocketForReconnect: (...args) => closes.push(args), attachReadyTimeoutMs: 20,
+    attachMaxDurationMs: 60,
+  });
+  lifecycle.startAttachReadyTimer(session, socket);
+  session.receivedHistoryCursor = 100n;
+  clock.advance(20); clock.runTimeouts();
+  assert.equal(closes.length, 0, "receiving real history counts as progress");
+  session.appliedHistoryCursor = 50n;
+  clock.advance(20); clock.runTimeouts();
+  assert.equal(closes.length, 0, "draining received history counts as progress");
+  session.appliedHistoryCursor = 100n;
+  clock.advance(20); clock.runTimeouts();
+  assert.equal(closes.length, 1, "continued progress cannot extend the absolute deadline");
+});
+
+test("attach watchdog rejects retired timers on the same socket", () => {
+  const callbacks = [];
+  const closes = [];
+  const socket = createSocket();
+  const session = { socket, name: "target-1", id: "pane-1", connectionEpoch: 1 };
+  const lifecycle = createTerminalSessionConnectionLifecycle({
+    windowObject: { setTimeout(callback) { callbacks.push(callback); return callbacks.length; }, clearTimeout() {} },
+    closeSocketForReconnect: (...args) => closes.push(args), isReplayCommitted: () => false,
+  });
+  lifecycle.startAttachReadyTimer(session, socket);
+  lifecycle.startAttachReadyTimer(session, socket);
+  callbacks[0]();
+  assert.equal(closes.length, 0, "superseded attach timer must not affect its replacement");
+  lifecycle.disposeSession(session);
+  callbacks[1]();
+  assert.equal(closes.length, 0);
+});
+
+test("new snapshot baselines and passive health checks share the attach progress owner", () => {
+  const clock = createClock();
+  const closes = [];
+  const socket = createSocket();
+  const session = { socket, name: "target-1", id: "pane-1", connectionEpoch: 1,
+    receivedHistoryCursor: 4000n, appliedHistoryCursor: 4000n, replayController: { phase: "idle" } };
+  const lifecycle = createTerminalSessionConnectionLifecycle({ windowObject: clock.windowObject, now: clock.now,
+    isReplayCommitted: () => false, closeSocketForReconnect: (...args) => closes.push(args), attachReadyTimeoutMs: 20 });
+  lifecycle.startAttachReadyTimer(session, socket);
+  session.replayController.phase = "replaying";
+  session.receivedHistoryCursor = 3000n; session.appliedHistoryCursor = 2500n;
+  clock.advance(21);
+  assert.equal(lifecycle.checkAttachReady(session, socket), false, "new replay has its own cursor baseline");
+  session.appliedHistoryCursor = 2800n;
+  clock.advance(21);
+  assert.equal(lifecycle.checkAttachReady(session, socket), false);
+  session.lastSocketHealthAt = clock.now();
+  clock.advance(21);
+  assert.equal(lifecycle.checkAttachReady(session, socket), true, "ping does not extend a stalled replay");
+  lifecycle.dispose();
+});
+
+test("agent preparing timer replacement preserves the original attach deadline", () => {
+  const clock = createClock(); const closes = []; const socket = createSocket();
+  const session = { socket, name: "target-1", id: "pane-1", connectionEpoch: 1 };
+  const lifecycle = createTerminalSessionConnectionLifecycle({ windowObject: clock.windowObject, now: clock.now,
+    isReplayCommitted: () => false, closeSocketForReconnect: (...args) => closes.push(args), attachReadyTimeoutMs: 20, attachMaxDurationMs: 60 });
+  lifecycle.startAttachReadyTimer(session, socket);
+  clock.advance(40);
+  lifecycle.startAttachReadyTimer(session, socket, 45);
+  session.receivedHistoryCursor = 10n;
+  clock.advance(20); clock.runTimeouts();
+  assert.equal(closes.length, 1);
+});
+
 test("socket health monitor closes only the current pane after a real timeout", () => {
   const clock = createClock();
   const closes = [];

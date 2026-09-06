@@ -139,6 +139,8 @@ Browser
 - [`client_terminal.go`](../client_terminal.go)
 - [`client_terminal_test.go`](../client_terminal_test.go)
 
+大历史恢复时 output owner 以字节/实际解析时间预算分批 drain，相邻兼容小帧合并后以 32 KiB 上限写入；显式 resize entry fence 仍保持原条目语义。transport lifecycle 独占 attach 的进展、停滞和总期限，健康检查调用同一个 `checkAttachReady()`；replay 提交后由 presentation owner 完成最终画面验证。取消 hold 不能绕过 replay、geometry 和 generation 门禁宣布 ready，也不能提前释放唯一有效旧帧。客户端原始小帧多 tab 恢复由 [`tests-auto/17-client-tab-replay-recovery/`](../tests-auto/17-client-tab-replay-recovery/) 验证，不允许以容器 fallback 替代。
+
 ## 3. 前端模块路径地图
 
 所有前端模块通过目录下的 `index.js` 暴露公开入口。模块外不得深度导入内部实现。每个模块 README 是该模块职责、状态 owner、生命周期、依赖和测试契约的详细说明。
@@ -168,9 +170,9 @@ Browser
 | 终端配置和阈值 | `terminal/config/index.js` | [`terminal/config/README.md`](../runtime/static/terminal/config/README.md) | 不可变超时、限制和共享配置 |
 | history/replay | `terminal/history/index.js` | [`terminal/history/README.md`](../runtime/static/terminal/history/README.md) | cursor、history generation、replay 门禁、client history 兼容 |
 | output queue | `terminal/output/index.js` | [`terminal/output/README.md`](../runtime/static/terminal/output/README.md) | live/replay/suppressed output、有界 drain、ACK 和过载处理 |
-| transport | `terminal/transport/index.js` | [`terminal/transport/README.md`](../runtime/static/terminal/transport/README.md) | Unified/direct socket、协议、health、membership、主题和控制消息 |
+| transport | `terminal/transport/index.js` | [`terminal/transport/README.md`](../runtime/static/terminal/transport/README.md) | Unified/direct socket、协议、connection epoch、health、membership、主题和控制消息 |
 | rendering/presentation | `terminal/rendering/index.js` | [`terminal/rendering/README.md`](../runtime/static/terminal/rendering/README.md) | Ghostty renderer、Canvas、presentation、Kitty graphics、frame hold |
-| resize | `terminal/resize/index.js` | [`terminal/resize/README.md`](../runtime/static/terminal/resize/README.md) | geometry、DPR、resize owner、单 in-flight/latest target、ACK fence 和多 source live geometry |
+| resize | `terminal/resize/index.js` | [`terminal/resize/README.md`](../runtime/static/terminal/resize/README.md) | geometry、DPR、connection-scoped resize owner、单 in-flight/latest target、ACK fence 和多 source live geometry |
 | viewport | `terminal/viewport/index.js` | [`terminal/viewport/README.md`](../runtime/static/terminal/viewport/README.md) | 移动 visualViewport、软键盘、安全偏移和方向恢复 |
 | session | `terminal/session/index.js` | [`terminal/session/README.md`](../runtime/static/terminal/session/README.md) | pane identity、初始状态、resource factory、安装和销毁 |
 | input | `terminal/input/index.js` | [`terminal/input/README.md`](../runtime/static/terminal/input/README.md) | textarea、输入队列、IME、generated response、focus、移动快捷键 |
@@ -198,6 +200,8 @@ global-runtime
 原生粘贴的跨模块契约是：IME textarea 和 session installation 的 terminal host listener 只转发浏览器 `paste` 事件；`app/paste` 是文件/文本判定、事件消费和异步 continuation 的唯一 owner。文件优先交给 attachments 的公开上传命令，文本及上传后的路径交给 terminal clipboard/input 命令；attachments 持有 XHR、进度和创建时实例/tab，app/paste 持有触发 session 与 dispose generation。上传结果只有在原 session 仍由 workspace registry 持有且实例未切换时才能发送，路径不得携带 CR/LF 或自动 Enter。`global-runtime.js` 只注入这些公开命令和只读有效性判断。
 
 终端输入没有应用级、Provider 级或 persistent-agent/pane 级共享锁。服务更新提示只管理弹窗与重载意图，不修改输入状态；普通输入在 replay、连接和 resize ACK 就绪后交给当前 PTY/TUI。滚动升级时旧 `terminal_input_blocked` 请求和 `input_lock` 控制帧仅在 Provider 边界无状态接受并忽略，不能生成 agent frame、阻塞其他 attach 或静默丢弃 PTY 输入。移动端双击展开键盘使用的 `inputViewportLock` 仍归 viewport 几何所有，只抑制 visualViewport 的中间几何同步，不阻止字符输入。
+
+resize 与 transport 的重连契约是：transport 拥有 logical `connectionEpoch`，每次推进后只调用 resize 的公开 `beginConnection()`；resize owner 退休旧状态机/ACK/fence/settle，隐藏 pane 不自动抢占，可见 pane 的 latest target/current-device claim 在新 replay 采用服务端 epoch/geometry 后至多重放一次。旧 connection 的 ACK 和 callback 必须被拒绝，新 resize epoch 必须保持单调；非本地在途的更高 epoch 只作为 remote observation，重复 remote ACK 幂等。input 继续排队，直到新 connection 的 replay、socket 和 resize ACK 全部 ready 后按顺序 flush。该链路的真实物理断线回归由 `tests-auto/01-multi-device-resize-sync` 覆盖。
 
 删除 `agentFrameLock` 的 agent 协议版本为 `lcmd-webshell-agent-v10`，v9 被明确列为 attach-compatible。Provider 握手发现 v9 时继续 attach 原 pane、保持 PTY/历史/输入/输出，只由 `app/agent_protocol_update` 显示非阻塞更新入口；确认后 scoped 协议更新接口才执行 `replace-active` 并校验 v10 就绪，不要求重启 WebShell 应用服务。只有兼容表之外的版本才暂停 attach 并标记 `updateRequired`。
 
@@ -251,12 +255,13 @@ global-runtime
 - 单个场景：`node tests-auto/run-playwright.mjs tests-auto/<场景目录>/test.mjs`
 - 当前生产前端资源映射：先执行 `npm run build`，再使用 `WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static"`
 - 失败产物：对应场景目录的 `artifacts/`，包含截图、trace、JSONL 事件和错误摘要。
+- 完整入口会先构建当前 Vite 资源，再按场景注入 profile；`04` 使用 iPhone User-Agent，`11` 清空本地静态映射以允许 Service Worker，任何 required 场景报告 skip 都视为失败。
 
 当前场景导航：
 
 | 场景目录 | 覆盖范围 |
 | --- | --- |
-| [`tests-auto/01-multi-device-resize-sync/`](../tests-auto/01-multi-device-resize-sync/) | PC/移动端共享 pane、尺寸 claim、PTY 输出同步和跨设备 resize |
+| [`tests-auto/01-multi-device-resize-sync/`](../tests-auto/01-multi-device-resize-sync/) | PC/移动端共享 pane、尺寸 claim、PTY 输出同步，以及 resize 在途时物理断线后的 claim/输入恢复 |
 | [`tests-auto/02-terminal-input/`](../tests-auto/02-terminal-input/) | PC/移动端终端输入和输入状态 |
 | [`tests-auto/03-terminal-ime/`](../tests-auto/03-terminal-ime/) | 移动端 IME、composition 和输入法交互 |
 | [`tests-auto/04-terminal-viewport/`](../tests-auto/04-terminal-viewport/) | visualViewport、折叠/展开、键盘和移动 viewport |

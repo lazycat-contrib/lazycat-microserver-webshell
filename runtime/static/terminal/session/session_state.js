@@ -155,6 +155,8 @@ const createResizeState = () => ({
   pendingSizeClaimOptions: null,
   resizeEpochSupported: null,
   resizeAckPending: false,
+  resizeConnectionEpoch: 0,
+  resizeConnectionTransitionPending: false,
   suppressTerminalResizeSend: false,
   lastObservedHostWidth: 0,
   lastObservedHostHeight: 0,

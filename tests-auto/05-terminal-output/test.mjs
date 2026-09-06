@@ -338,8 +338,9 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
       state.page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 })
     )));
   }
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await mobile.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await Promise.all([desktop, mobile].map((state) => (
+    terminalHost(state).waitFor({ state: "visible", timeout: 60_000 })
+  )));
 
   const initialPresentation = {
     desktop: initialPresentationSummary(desktop),
@@ -418,7 +419,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     await desktop.page.waitForTimeout(500);
     await setOutputStage(desktop, "reactivate-output-tab");
     await desktop.page.locator(`#tabs .tab[data-tab-id="${desktop.testTabID}"]`).click();
-    await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 30_000 });
+    await terminalHost(desktop).waitFor({ state: "visible", timeout: 30_000 });
     await waitForOutput(desktop, hiddenDone, 30_000);
 
     await setOutputStage(desktop, "resize-output");

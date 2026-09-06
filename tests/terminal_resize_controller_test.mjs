@@ -246,6 +246,8 @@ const createRuntimeHarness = () => {
     connectionEpoch: 4,
     resizeEpochSupported: true,
     resizeAckPending: false,
+    resizeConnectionEpoch: 0,
+    resizeConnectionTransitionPending: false,
     resizeController: new TerminalResizeController(),
     resizeFenceActive: false,
     resizeFenceTarget: null,
@@ -263,6 +265,12 @@ const createRuntimeHarness = () => {
     resizePresentationHold: false,
     terminalFrameHeld: false,
     renderReady: true,
+    requestedResizeClaim: false,
+    pendingSizeClaim: false,
+    pendingSizeClaimOptions: null,
+    pendingResizeTarget: null,
+    sizeClaimRequired: false,
+    sizeClaimed: false,
     fullRenderPending: false,
     initialRuntimeResetDone: true,
     fitAddon: { proposeDimensions: () => ({ cols: 100, rows: 30 }) },
@@ -365,6 +373,34 @@ test("a newer remote resize epoch is observed without applying an intermediate r
   assert.equal(harness.controller.isCurrentDeviceClaimRequired(harness.session), true);
   assert.equal(harness.session.resizeAckPending, false);
   assert.equal(harness.session.resizePresentationHold, true);
+});
+
+test("a repeated remote resize ACK is idempotent after the local transaction has ended", () => {
+  const harness = createRuntimeHarness();
+  assert.equal(harness.controller.sendSize(harness.session, { force: true }), true);
+  const localEpoch = BigInt(harness.sent[0].resize_epoch);
+  harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: String(localEpoch),
+    cols: 100,
+    rows: 30,
+    pixel_width: 1000,
+    pixel_height: 600,
+  });
+  const remote = {
+    type: "resize-applied",
+    resize_epoch: String(localEpoch + 1n),
+    cols: 120,
+    rows: 40,
+    pixel_width: 1200,
+    pixel_height: 800,
+  };
+
+  assert.equal(harness.controller.handleApplied(harness.session, remote), true);
+  assert.equal(harness.session.resizeAckPending, false);
+  assert.equal(harness.controller.handleApplied(harness.session, remote), true);
+  assert.equal(harness.session.appliedResizeEpoch, remote.resize_epoch);
+  assert.equal(harness.session.resizeAckPending, false);
 });
 
 test("passive geometry correction waits for an explicit current-device claim after a remote owner is observed", () => {
@@ -606,6 +642,104 @@ test("a newer resize target waits behind the current epoch and retry reuses that
   assert.equal(harness.sent[2].rows, 40);
   assert.equal(harness.sent[2].claim, true);
   assert.notEqual(harness.sent[2].resize_epoch, firstEpoch);
+});
+
+test("connection transition retires the old resize transaction and replays one pending claim", () => {
+  const harness = createRuntimeHarness();
+  assert.equal(harness.controller.sendSize(harness.session, {
+    force: true,
+    claim: true,
+    dimensions: { cols: 100, rows: 30, pixelWidth: 1000, pixelHeight: 600 },
+  }), true);
+  const oldEpoch = harness.sent[0].resize_epoch;
+  const oldController = harness.session.resizeController;
+  assert.equal(harness.session.resizeAckPending, true);
+
+  harness.session.connectionEpoch += 1;
+  assert.equal(harness.controller.beginConnection(harness.session), true);
+  assert.equal(harness.session.resizeAckPending, false);
+  assert.equal(harness.session.pendingSizeClaim, true);
+  assert.equal(harness.session.sizeClaimRequired, true);
+  assert.notEqual(harness.session.resizeController, oldController);
+  assert.equal(harness.session.resizeController.phase, "idle");
+
+  harness.controller.handleReplayStart(harness.session, {
+    resize_protocol: "epoch-v1",
+    resize_epoch: String(BigInt(oldEpoch) + 1n),
+    cols: 120,
+    rows: 40,
+    pixel_width: 1200,
+    pixel_height: 800,
+  });
+  assert.equal(harness.sent.length, 2);
+  assert.equal(harness.sent[1].claim, true);
+  assert.notEqual(harness.sent[1].resize_epoch, oldEpoch);
+  assert.equal(harness.session.pendingSizeClaim, false);
+
+  assert.equal(harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: oldEpoch,
+    cols: 100,
+    rows: 30,
+    pixel_width: 1000,
+    pixel_height: 600,
+  }), false);
+  assert.equal(harness.session.resizeAckPending, true);
+
+  harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: harness.sent[1].resize_epoch,
+    cols: 100,
+    rows: 30,
+    pixel_width: 1000,
+    pixel_height: 600,
+  });
+  assert.equal(harness.session.resizeAckPending, false);
+  assert.equal(harness.session.sizeClaimRequired, false);
+});
+
+test("a visible resize owner reclaims the pane once on a new logical connection", () => {
+  const harness = createRuntimeHarness();
+  harness.session.sizeClaimed = true;
+  harness.session.connectionEpoch += 1;
+
+  assert.equal(harness.controller.beginConnection(harness.session), true);
+  assert.equal(harness.controller.beginConnection(harness.session), false);
+  assert.equal(harness.session.pendingSizeClaim, true);
+  assert.equal(harness.session.sizeClaimed, false);
+
+  harness.controller.handleReplayStart(harness.session, {
+    resize_protocol: "epoch-v1",
+    resize_epoch: "20",
+    cols: 80,
+    rows: 24,
+    pixel_width: 800,
+    pixel_height: 480,
+  });
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].claim, true);
+});
+
+test("a hidden former resize owner does not reclaim the pane after reconnect", () => {
+  const harness = createRuntimeHarness();
+  harness.session.sizeClaimed = true;
+  harness.session.tabId = "tab-hidden";
+  harness.session.connectionEpoch += 1;
+
+  assert.equal(harness.controller.beginConnection(harness.session), true);
+  assert.equal(harness.session.pendingSizeClaim, false);
+  assert.equal(harness.session.sizeClaimed, false);
+  assert.equal(harness.session.sizeClaimRequired, true);
+
+  harness.controller.handleReplayStart(harness.session, {
+    resize_protocol: "epoch-v1",
+    resize_epoch: "20",
+    cols: 80,
+    rows: 24,
+    pixel_width: 800,
+    pixel_height: 480,
+  });
+  assert.equal(harness.sent.length, 0);
 });
 
 test("force size sync does not resend an already applied target", () => {

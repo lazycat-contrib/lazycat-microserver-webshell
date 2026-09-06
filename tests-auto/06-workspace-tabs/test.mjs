@@ -60,6 +60,15 @@ const closeTabByAPI = async (state, tabID) => state.page.evaluate(async (id) => 
   if (!response.ok) throw new Error(`workspace close_tab ${response.status}: ${await response.text()}`);
 }, tabID);
 
+const waitForStableActiveTerminal = (page, timeout = 60_000) => page.waitForFunction(() => {
+  const shell = document.querySelector(".terminal-pane.active .pane-shell");
+  const canvas = shell?.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
+  return shell?.dataset.renderReady === "true"
+    && shell.dataset.hasPresentedFrame === "true"
+    && Number(canvas?.width || 0) > 0
+    && Number(canvas?.height || 0) > 0;
+}, null, { timeout });
+
 export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   if (!config.localStaticDir) {
     throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required so the real environment loads the current workspace frontend");
@@ -68,7 +77,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   const tabID = String(desktop.testTabID || "").trim();
   if (!tabID) throw new Error("isolated workspace tab is unavailable");
 
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await waitForStableActiveTerminal(desktop.page);
   const transportErrors = [];
   const onConsole = (message) => {
     const text = message.text();
@@ -86,8 +95,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     await desktop.page.waitForFunction((id) => {
       const pane = document.querySelector(`.terminal-pane.active[data-tab-id="${CSS.escape(id)}"] .pane-shell`);
       const startupError = document.querySelector("#startupErrorPanel");
-      return pane?.dataset.connection === "open"
-        && pane.dataset.renderReady === "true"
+      return pane?.dataset.renderReady === "true"
         && pane.dataset.hasPresentedFrame === "true"
         && (!startupError || startupError.hidden);
     }, temporaryTabID, { timeout: 60_000 });
@@ -111,7 +119,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     if (temporaryTabID) {
       await closeTabByAPI(desktop, temporaryTabID).catch(() => {});
       await desktop.page.locator(`#tabs .tab[data-tab-id="${tabID}"]`).click();
-      await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 30_000 });
+      await waitForStableActiveTerminal(desktop.page, 30_000);
     }
   }
 
@@ -140,7 +148,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   }, { id: tabID, label: renamed });
 
   await desktop.page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await waitForStableActiveTerminal(desktop.page);
   await desktop.page.waitForFunction(({ id, label }) => (
     document.querySelector(`.tab[data-tab-id="${CSS.escape(id)}"] .tab-label`)?.textContent === label
   ), { id: tabID, label: renamed });

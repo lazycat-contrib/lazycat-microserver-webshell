@@ -2,7 +2,7 @@
 
 ## 场景元数据
 
-- 状态：blocked（修复后 Provider 包已构建，等待安装到测试实例后执行最终真实回归）
+- 状态：active
 - 类型：multi-device / lifecycle
 - 真实依赖：真实 Provider、persistent agent、PTY、Unified WebSocket、两个浏览器 context
 - 相关模块和源码入口：`runtime/static/app/server_revision/`、`runtime/static/app/agent_protocol_update/`、`runtime/static/terminal/input/`、`runtime/static/terminal/transport/`、`terminal_queue.go`、`agent.go`、`workspace.go`
@@ -82,11 +82,12 @@ node tests-auto/run-playwright.mjs tests-auto/14-terminal-input-lock-lifecycle/t
 - agent 协议已提升为 `lcmd-webshell-agent-v10`；协议更新、握手和 workspace mismatch 的 Go/Node 定向测试通过。测试明确固定 v9 为 `updateAvailable=true / updateRequired=false`，Queue ready 后 logical stream 仍可发送普通输入；兼容 notice 不会自动弹框。
 - 提升协议版本后再次执行 `lzc-cli project release`，成功生成 39 MiB LPK；产物二进制确认包含 `lcmd-webshell-agent-v10`，前后端联合构建通过。
 - 2026-09-04 用户反馈当前版本手动测试未遇到问题；该结果作为人工抽查记录，不替代修复后本场景的自动化运行。
-- 修复后本场景尚未运行：`WEBSHELL_LOCAL_STATIC_DIR` 只能映射前端资源，测试机仍运行旧 Provider，会继续执行旧 agent blocker；必须先安装本次 LPK 才能验证 no-op 后端。
+- 本轮预检 `artifacts/2026-09-04T10-37-06-927Z/` 在旧 `input_lock` 已发送后 marker 超时。trace 显示 mobile 测试只 tap host，没有聚焦 helper textarea，因此没有可靠地产生用户输入；同期另一设备更高 resize epoch 的重复 ACK 被旧本地状态机再次处理，产生 `resize request or connection epoch mismatch` warning。两项分别由显式 textarea focus/单 input frame 断言，以及 resize duplicate remote ACK 幂等处理修复。
+- 修正后独立通过，并在最终全量的 `artifacts/2026-09-04T11-16-28-879Z/` 再次通过：旧 `input_lock` 被无状态忽略，mobile 恰好发送 1 个 marker input frame 并收到真实 PTY 回显，两页各 1 条 active Unified socket，无 duplicate remote ACK mismatch。
 
 ## 已知限制
 
 - 本场景通过真实 Unified WebSocket 发送旧版前端仍可能发送的兼容控制帧，不要求实际部署一个旧前端包。
 - 本场景验证跨 attach 的用户可见结果；Provider no-op 的内部无状态性另由 Go 测试锁定。
-- 当前未获得把新 LPK 安装到外部测试实例的明确授权，因此不能把本 Bug 标记为完全验证。
-- 仓库 HEAD 原本存在与本次无关的 `TestRuntimeTerminalCanvasResidueGuard` 失败：测试要求 `object-fit: none`，而 HEAD 的 `runtime/static/style.css` 使用 `object-fit: contain`；本次没有修改该 CSS 或放宽该断言。
+- 测试目标必须运行已移除后端 blocker 的兼容 Provider/agent；若重新连接旧部署，本场景会按 marker 超时失败，不能用前端静态映射伪造通过。
+- 当前完整 Node 437/437 和 `go test ./... -count=1` 均通过。

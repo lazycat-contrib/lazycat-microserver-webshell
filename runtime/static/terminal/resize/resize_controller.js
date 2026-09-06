@@ -477,6 +477,70 @@ export function createTerminalResizeController({
 
   let lifecycle;
 
+  const beginConnection = (session, { connectionEpoch = session?.connectionEpoch } = {}) => {
+    if (disposed || !session || session.closed) {
+      return false;
+    }
+    const nextConnectionEpoch = Math.max(0, Math.floor(Number(connectionEpoch) || 0));
+    if (nextConnectionEpoch <= 0 || Number(session.resizeConnectionEpoch || 0) === nextConnectionEpoch) {
+      return false;
+    }
+    const requestTarget = session.resizeAckPending && Number(session.requestedCols || 0) > 0
+      ? {
+        cols: session.requestedCols,
+        rows: session.requestedRows,
+        pixelWidth: session.requestedPixelWidth,
+        pixelHeight: session.requestedPixelHeight,
+        claim: session.requestedResizeClaim === true,
+      }
+      : null;
+    const preserveVisibleIntent = isVisible(session);
+    const hadClaimIntent = session.pendingSizeClaim === true
+      || session.requestedResizeClaim === true
+      || session.pendingResizeTarget?.claim === true;
+    const wasSizeClaimed = session.sizeClaimed === true;
+    const latestTarget = preserveVisibleIntent
+      ? (session.pendingResizeTarget || requestTarget)
+      : null;
+    const pendingClaim = preserveVisibleIntent && (
+      hadClaimIntent
+      || latestTarget?.claim === true
+      || wasSizeClaimed
+    );
+    const pendingClaimOptions = session.pendingSizeClaimOptions || {};
+    const previousConnectionEpoch = Number(session.resizeConnectionEpoch || 0);
+    const retiredResizeEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
+
+    clearOutputSettle(session);
+    clearFence(session);
+    session.resizeAckPending = false;
+    session.requestedResizeClaim = false;
+    session.sizeClaimed = false;
+    session.resizeControllerSettleToken = 0;
+    session.resizeController = new TerminalResizeController();
+    session.resizeConnectionEpoch = nextConnectionEpoch;
+    session.resizeConnectionTransitionPending = true;
+    if (pendingClaim) {
+      session.pendingResizeTarget = null;
+      queuePendingSizeClaim(session, pendingClaimOptions);
+    } else {
+      clearPendingSizeClaim(session);
+      session.sizeClaimRequired = session.sizeClaimRequired === true || hadClaimIntent || wasSizeClaimed;
+      session.pendingResizeTarget = latestTarget ? { ...latestTarget, claim: false } : null;
+    }
+    recordEvent(session, "resize_connection_transition", {
+      previousConnectionEpoch,
+      connectionEpoch: nextConnectionEpoch,
+      retiredResizeEpoch,
+      pendingClaim,
+      pendingTarget: session.pendingResizeTarget ? {
+        cols: session.pendingResizeTarget.cols,
+        rows: session.pendingResizeTarget.rows,
+      } : null,
+    });
+    return true;
+  };
+
   const sendSize = (session, { force = false, dimensions = null, claim = false } = {}) => {
     trace(session, "send_size_enter", { force, claim });
     if (disposed || !session || !isSocketOpen(session)) {
@@ -802,18 +866,32 @@ export function createTerminalResizeController({
       recordEvent(session, "resize_ack_stale", staleDetails());
       return false;
     }
-    const resizeController = session.resizeController || (session.resizeController = new TerminalResizeController());
-    try {
-      resizeController.acknowledge({
-        requestID: String(requestedEpoch || epoch),
-        connectionEpoch: Number(session.connectionEpoch || 0),
-        resizeEpoch: epoch,
-        dimensions: ackDimensions,
-      });
-    } catch (error) {
-      recordEvent(session, "resize_ack_stale", staleDetails());
-      consoleObject?.warn?.("[terminal-resize] rejected stale resize ACK", error);
-      return false;
+    const duplicateAppliedAck = session.resizeAckPending !== true
+      && appliedEpoch === epoch
+      && terminalResizeTargetsMatch({
+        cols: session.serverCols,
+        rows: session.serverRows,
+        pixelWidth: session.serverPixelWidth,
+        pixelHeight: session.serverPixelHeight,
+      }, ackDimensions);
+    if (duplicateAppliedAck) {
+      recordEvent(session, "resize_ack_duplicate", staleDetails());
+      return true;
+    }
+    if (session.resizeAckPending === true) {
+      const resizeController = session.resizeController || (session.resizeController = new TerminalResizeController());
+      try {
+        resizeController.acknowledge({
+          requestID: String(requestedEpoch || epoch),
+          connectionEpoch: Number(session.connectionEpoch || 0),
+          resizeEpoch: epoch,
+          dimensions: ackDimensions,
+        });
+      } catch (error) {
+        recordEvent(session, "resize_ack_stale", staleDetails());
+        consoleObject?.warn?.("[terminal-resize] rejected stale resize ACK", error);
+        return false;
+      }
     }
     session.appliedResizeEpoch = epoch;
     session.serverCols = ackDimensions.cols;
@@ -2016,6 +2094,33 @@ export function createTerminalResizeController({
       session.serverRows = Math.max(0, Math.floor(Number(message?.rows) || 0));
       session.serverPixelWidth = Math.max(0, Math.floor(Number(message?.pixel_width) || 0));
       session.serverPixelHeight = Math.max(0, Math.floor(Number(message?.pixel_height) || 0));
+      if (session.resizeConnectionTransitionPending) {
+        const previousRequestedEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
+        session.requestedResizeEpoch = previousRequestedEpoch
+          && BigInt(previousRequestedEpoch) > BigInt(replayResizeEpoch)
+          ? previousRequestedEpoch
+          : replayResizeEpoch;
+        session.requestedCols = session.serverCols;
+        session.requestedRows = session.serverRows;
+        session.requestedPixelWidth = session.serverPixelWidth;
+        session.requestedPixelHeight = session.serverPixelHeight;
+      }
+    }
+    const pendingTarget = session.pendingResizeTarget;
+    session.resizeConnectionTransitionPending = false;
+    if (session.pendingSizeClaim) {
+      schedulePendingSizeClaim(session);
+    } else if (pendingTarget) {
+      session.pendingResizeTarget = null;
+      lifecycle.scheduleSessionFrame(session, "connection-pending-resize", () => {
+        if (!session.resizeAckPending) {
+          sendSize(session, {
+            force: true,
+            dimensions: pendingTarget,
+            claim: pendingTarget.claim === true,
+          });
+        }
+      });
     }
     return true;
   };
@@ -2049,6 +2154,7 @@ export function createTerminalResizeController({
   };
 
   return Object.freeze({
+    beginConnection,
     normalizeEpoch: normalizeTerminalResizeEpoch,
     size,
     isMeasurable,

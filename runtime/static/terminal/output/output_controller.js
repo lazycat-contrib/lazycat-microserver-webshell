@@ -13,6 +13,8 @@ export const TERMINAL_OUTPUT_FLUSH_BUDGET_BYTES = 128 * 1024;
 export const TERMINAL_OUTPUT_FLUSH_MAX_ENTRIES = 8;
 export const TERMINAL_OUTPUT_FLUSH_TIME_BUDGET_MS = 12;
 export const TERMINAL_REPLAY_WRITE_BATCH_BYTES = 512 * 1024;
+// Check the wall-clock budget between parser calls, not only while partitioning.
+const TERMINAL_OUTPUT_WRITE_SLICE_BYTES = 32 * 1024;
 export const TERMINAL_OUTPUT_QUEUE_SOFT_LIMIT_BYTES = 1 * 1024 * 1024;
 export const MAX_QUEUED_TERMINAL_OUTPUT_BYTES = 4 * 1024 * 1024;
 
@@ -273,48 +275,59 @@ export function createTerminalOutputController({
     let drained = false;
     measureTask("output flush", () => {
       const flushQueue = [];
-      const restQueue = [];
       let flushedBytes = 0;
-      let restBytes = 0;
       const requestedBudgetBytes = Math.max(0, Math.floor(Number(maxBytes) || 0));
       const requestedEntryLimit = Math.max(0, Math.floor(Number(maxEntries) || 0));
       const requestedTimeBudgetMs = Math.max(0, Number(maxTimeMs) || 0);
       const budgetBytes = requestedBudgetBytes || (queue[0]?.replayOutput
         ? replayWriteBatchBytes
         : flushBudgetBytes);
-      const entryLimit = requestedEntryLimit || (force ? 0 : flushMaxEntries);
+      const entryLimit = requestedEntryLimit || (force || queue[0]?.replayOutput ? 0 : flushMaxEntries);
       const timeBudgetMs = requestedTimeBudgetMs || (force ? 0 : flushTimeBudgetMs);
-      const partitionStartedAt = now();
-      if (force && requestedBudgetBytes === 0 && requestedEntryLimit === 0 && requestedTimeBudgetMs === 0) {
-        flushQueue.push(...queue);
-        flushedBytes = queue.reduce((total, entry) => total + entry.byteLength, 0);
-      } else {
-        for (const entry of queue) {
-          if (
-            restQueue.length > 0
-            || (entryLimit > 0 && flushQueue.length >= entryLimit)
-            || (timeBudgetMs > 0 && flushQueue.length > 0 && now() - partitionStartedAt >= timeBudgetMs)
-            || (flushQueue.length > 0 && flushedBytes + entry.byteLength > budgetBytes)
-          ) {
-            restQueue.push(entry);
-            restBytes += entry.byteLength;
-          } else {
-            flushQueue.push(entry);
-            flushedBytes += entry.byteLength;
-          }
-        }
-      }
-      state.outputQueue = restQueue;
-      state.outputQueueSize = restBytes;
-
+      const unlimited = force && !requestedBudgetBytes && !requestedEntryLimit && !requestedTimeBudgetMs;
+      const drainStartedAt = now();
       let wrote = false;
-      let batch = null;
-      const flushBatch = () => {
-        if (!batch) {
-          return;
+      let consumed = 0;
+      while (state.outputQueue.length > 0) {
+        const pending = state.outputQueue;
+        if (consumed > 0 && (
+          (entryLimit > 0 && consumed >= entryLimit)
+          || (!unlimited && flushedBytes + pending[0].byteLength > budgetBytes)
+          || (timeBudgetMs > 0 && now() - drainStartedAt >= timeBudgetMs)
+        )) break;
+        const first = pending[0];
+        const batch = { ...first, chunks: [], byteLength: 0 };
+        let batchEntries = 0;
+        const sliceBytes = Math.min(TERMINAL_OUTPUT_WRITE_SLICE_BYTES, first.replayOutput ? replayWriteBatchBytes : flushBudgetBytes);
+        while (batchEntries < pending.length) {
+          const entry = pending[batchEntries];
+          if (batch.chunks.length > 0 && (
+            batch.kind !== entry.kind
+            || batch.replayOutput !== entry.replayOutput
+            || batch.suppressRender !== entry.suppressRender
+            || batch.allowGeneratedInput !== entry.allowGeneratedInput
+            || batch.historyCacheable !== entry.historyCacheable
+            || (batch.historyEndCursor !== null && entry.historyStartCursor !== batch.historyEndCursor)
+            || batch.byteLength + entry.byteLength > sliceBytes
+            || (entryLimit > 0 && consumed >= entryLimit)
+            || (!unlimited && flushedBytes + entry.byteLength > budgetBytes)
+            || (timeBudgetMs > 0 && now() - drainStartedAt >= timeBudgetMs)
+          )) break;
+          batch.chunks.push(entry.data);
+          batch.byteLength += entry.byteLength;
+          batch.historyEndCursor = entry.historyEndCursor;
+          flushQueue.push(entry);
+          flushedBytes += entry.byteLength;
+          consumed += 1;
+          batchEntries += 1;
         }
+        // Remove only this batch before invoking callbacks. A reset during write
+        // must not reintroduce retired output or overwrite a replacement queue.
+        state.outputQueue = pending.slice(batchEntries);
+        state.outputQueueSize = Math.max(0, state.outputQueueSize - batch.byteLength);
         const data = coalesceTerminalOutputBatch(batch.chunks, batch.kind, batch.byteLength);
         if (writeBatch(state, data, batch.replayOutput, batch.allowGeneratedInput, batch.suppressRender)) {
+          if (state.closed || state.outputQueueGeneration !== first.queueGeneration) break;
           wrote = true;
           if (batch.historyEndCursor !== null) {
             state.appliedHistoryCursor = batch.historyEndCursor;
@@ -323,54 +336,7 @@ export function createTerminalOutputController({
             }
           }
         }
-        batch = null;
-      };
-
-      for (const entry of flushQueue) {
-        if (
-          !batch
-          || batch.kind !== entry.kind
-          || batch.replayOutput !== entry.replayOutput
-          || batch.suppressRender !== entry.suppressRender
-          || batch.allowGeneratedInput !== entry.allowGeneratedInput
-          || batch.historyCacheable !== entry.historyCacheable
-          || (batch.historyEndCursor !== null && entry.historyStartCursor !== batch.historyEndCursor)
-        ) {
-          flushBatch();
-          batch = {
-            kind: entry.kind,
-            replayOutput: entry.replayOutput,
-            suppressRender: entry.suppressRender,
-            allowGeneratedInput: entry.allowGeneratedInput,
-            chunks: [],
-            byteLength: 0,
-            historyCacheable: entry.historyCacheable,
-            historyStartCursor: entry.historyStartCursor,
-            historyEndCursor: entry.historyEndCursor,
-          };
-        }
-        const batchLimitBytes = entry.replayOutput ? replayWriteBatchBytes : flushBudgetBytes;
-        if (batch.chunks.length > 0 && batch.byteLength + entry.byteLength > batchLimitBytes) {
-          flushBatch();
-          batch = {
-            kind: entry.kind,
-            replayOutput: entry.replayOutput,
-            suppressRender: entry.suppressRender,
-            allowGeneratedInput: entry.allowGeneratedInput,
-            chunks: [],
-            byteLength: 0,
-            historyCacheable: entry.historyCacheable,
-            historyStartCursor: entry.historyStartCursor,
-            historyEndCursor: entry.historyEndCursor,
-          };
-        }
-        batch.chunks.push(entry.data);
-        batch.byteLength += entry.byteLength;
-        if (entry.historyEndCursor !== null) {
-          batch.historyEndCursor = entry.historyEndCursor;
-        }
       }
-      flushBatch();
 
       if (wrote) {
         resetHostViewport(state, { clean: true });
@@ -464,7 +430,7 @@ export function createTerminalOutputController({
     }
     const suppressRender = (deferRender || resizeTransition.active) && !replayOutput;
     const allowGeneratedInput = replayOutput && state.allowGeneratedInputDuringReplay === true;
-    const outputChunkBytes = replayOutput ? replayWriteBatchBytes : flushBudgetBytes;
+    const outputChunkBytes = Math.min(TERMINAL_OUTPUT_WRITE_SLICE_BYTES, replayOutput ? replayWriteBatchBytes : flushBudgetBytes);
     const trackHistory = kind === "bytes" && state.historyProtocolActive;
     let nextHistoryCursor = trackHistory
       ? (startCursor === null ? state.receivedHistoryCursor : startCursor)

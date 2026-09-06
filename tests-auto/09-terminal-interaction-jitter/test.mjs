@@ -189,9 +189,28 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   }
   const { desktop } = states;
   const host = terminalHost(desktop);
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await desktop.page.waitForFunction(() => document.querySelector(".terminal-pane.active .terminal-host canvas:not(.terminal-frame-hold)")?.width > 0, { timeout: 30_000 });
-  await desktop.page.waitForTimeout(600);
+  await host.waitFor({ state: "visible", timeout: 60_000 });
+  // The shared runner opened a second device. Establish this device's geometry
+  // before measuring repeated interaction; the takeover is covered by case 01.
+  await host.click({ position: { x: 24, y: 24 } });
+  await desktop.page.waitForFunction(() => {
+    const shell = document.querySelector(".terminal-pane.active .pane-shell");
+    const canvas = shell?.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
+    const hold = shell?.querySelector(".terminal-frame-hold");
+    const host = shell?.querySelector(".terminal-host");
+    const rect = canvas?.getBoundingClientRect();
+    const hostRect = host?.getBoundingClientRect();
+    const requested = (window.__testsAutoResizeFrames || []).filter((frame) => !frame.paneID || frame.paneID === shell?.dataset.paneId).at(-1);
+    return shell?.dataset.renderReady === "true"
+      && shell.dataset.hasPresentedFrame === "true"
+      && Number(canvas?.width || 0) > 0
+      && Number(canvas?.height || 0) > 0
+      && hold?.hidden === true
+      && requested?.pixelWidth === canvas.width
+      && requested?.pixelHeight === canvas.height
+      && rect.height <= hostRect.height + 1
+      && rect.width <= hostRect.width + 1;
+  }, null, { timeout: 60_000 });
   await installSampler(desktop.page);
   // Ignore any final startup validation and measure only the stable interaction
   // window covered by this regression case.

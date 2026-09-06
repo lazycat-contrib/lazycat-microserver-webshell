@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { instanceSelector } from "../runtime/static/instances/index.js";
+import { redactBrowserArtifacts, redactDiagnosticText } from "./artifact-redaction.mjs";
 
 const testsAutoDir = path.dirname(fileURLToPath(import.meta.url));
 const localModuleRoot = path.join(testsAutoDir, "node_modules");
@@ -41,8 +43,8 @@ const envFlag = (value, fallback) => {
 export const config = {
   url: process.env.WEBSHELL_TEST_URL
     || "https://lightos.debug123.heiyu.space/webshell/?name=devos-core%40cloud.lazycat.lightos.entry&tab=tab-4",
-  username: process.env.WEBSHELL_TEST_USERNAME || "debug123",
-  password: process.env.WEBSHELL_TEST_PASSWORD || "123456",
+  username: String(process.env.WEBSHELL_TEST_USERNAME || ""),
+  password: String(process.env.WEBSHELL_TEST_PASSWORD || ""),
   rounds: Math.max(1, Number.parseInt(process.env.TEST_ROUNDS || "3", 10) || 3),
   foreground: process.env.HEADLESS === "1"
     ? false
@@ -101,7 +103,7 @@ const eventsPath = path.join(artifactsDir, "events.jsonl");
 const errorsPath = path.join(artifactsDir, "error.txt");
 const eventLog = async (event) => {
   const record = { at: new Date().toISOString(), ...event };
-  await fs.appendFile(eventsPath, `${JSON.stringify(record)}\n`);
+  await fs.appendFile(eventsPath, `${redactDiagnosticText(JSON.stringify(record), [config.username, config.password])}\n`);
   if (record.status !== "info" || record.action !== "console") {
     process.stdout.write(`[${record.status || "event"}] ${record.action || record.message || ""}\n`);
   }
@@ -146,12 +148,23 @@ const outerResize = (frame) => {
     const control = value?.control;
     const resize = value?.type === "pane-control" ? control : value;
     if (resize?.type !== "resize") return null;
-    return { cols: Number(resize.cols), rows: Number(resize.rows), resizeEpoch: resize.resize_epoch || "" };
+    return {
+      paneID: String(value?.pane_id || ""),
+      cols: Number(resize.cols),
+      rows: Number(resize.rows),
+      pixelWidth: Number(resize.pixel_width || 0),
+      pixelHeight: Number(resize.pixel_height || 0),
+      resizeEpoch: resize.resize_epoch || "",
+      claim: resize.claim === true,
+    };
   } catch { return null; }
 };
 
 const loginIfNeeded = async (page, name) => {
   if (!page.url().includes("/sys/login")) return false;
+  if (!config.username || !config.password) {
+    throw new Error("WEBSHELL_TEST_USERNAME and WEBSHELL_TEST_PASSWORD are required when the test target requests login");
+  }
   await page.locator("#username").fill(config.username);
   await page.locator("#password").fill(config.password);
   await page.locator("#submit").waitFor({ state: "visible" });
@@ -168,18 +181,27 @@ const resolveTestURL = async (page, windowName) => {
   const response = await page.request.get(instancesURL.toString());
   if (!response.ok()) throw new Error(`instances ${response.status()}: ${await response.text()}`);
   const instances = await response.json();
-  const selectors = new Set(instances.map((instance) => `${instance.name}@${instance.owner_deploy_id}`));
-  if (requestedName && selectors.has(requestedName)) return requestedURL.toString();
+  const selectors = new Set(instances.map(instanceSelector));
+  if (requestedName && selectors.has(requestedName) && (config.targetKind !== "client" || requestedName.startsWith("client:"))) return requestedURL.toString();
+  if (config.targetKind === "client" || requestedName.startsWith("client:")) {
+    const client = !requestedName.startsWith("client:") && instances.find((instance) => (
+      instanceSelector(instance).startsWith("client:") && instance.status === "running"
+    ));
+    if (!client) throw new Error("CLIENT_TARGET_UNAVAILABLE: no authorized running client: terminal; container fallback is forbidden");
+    requestedURL.searchParams.set("name", instanceSelector(client));
+    requestedURL.searchParams.delete("tab");
+    return requestedURL.toString();
+  }
   const fallback = instances.find((instance) => instance.status === "running");
   if (!fallback) throw new Error(`requested instance ${requestedName || "(empty)"} is unavailable and no running fallback exists`);
-  const fallbackName = `${fallback.name}@${fallback.owner_deploy_id}`;
+  const fallbackName = instanceSelector(fallback);
   requestedURL.searchParams.set("name", fallbackName);
   requestedURL.searchParams.delete("tab");
   await eventLog({ status: "pass", window: windowName, action: "select-running-instance", requestedName, selectedName: fallbackName });
   return requestedURL.toString();
 };
 
-const createWindow = async (name, viewport, position) => {
+const createWindow = async (name, viewport, position, onCreated, beforeNavigate) => {
   const headless = !config.foreground;
   const browser = await chromium.launch({
     headless,
@@ -200,7 +222,7 @@ const createWindow = async (name, viewport, position) => {
   await installLocalStaticRoute(context);
   const page = await context.newPage();
   const state = { name, page, browser, context, framesSent: [], output: "", lastResize: null, fatalErrors: [], assetRequestFailures: [], resizeErrors: 0, initialTerminalTimeline: [] };
-  await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+  onCreated?.(state);
   await page.addInitScript(({ captureTimeline, enableInitializationPerformance }) => {
     if (captureTimeline || enableInitializationPerformance) {
       window.localStorage.setItem("webshell.debugMode", "true");
@@ -212,6 +234,7 @@ const createWindow = async (name, viewport, position) => {
       window.localStorage.setItem("webshell.initializationPerformance", "true");
     }
     window.__testsAutoResizeFrames = [];
+    window.__testsAutoResizeResponses = [];
     window.__testsAutoResizeTrace = [];
     window.__testsAutoTerminalOutput = "";
     window.__testsAutoSockets = [];
@@ -269,8 +292,11 @@ const createWindow = async (name, viewport, position) => {
           const resize = value?.type === "pane-control" ? value.control : value;
           if (resize?.type === "resize") {
             window.__testsAutoResizeFrames.push({
+              paneID: String(value?.pane_id || ""),
               cols: Number(resize.cols),
               rows: Number(resize.rows),
+              pixelWidth: Number(resize.pixel_width || 0),
+              pixelHeight: Number(resize.pixel_height || 0),
               resizeEpoch: resize.resize_epoch || "",
               claim: resize.claim === true,
             });
@@ -284,6 +310,22 @@ const createWindow = async (name, viewport, position) => {
       if (typeof data === "string") {
         try {
           const value = JSON.parse(data);
+          const control = value?.type === "pane-control" ? value.payload : value;
+          if (control?.type === "resize-applied" || control?.type === "resize-error") {
+            window.__testsAutoResizeResponses.push({
+              paneID: String(value?.pane_id || control?.pane_id || ""),
+              type: String(control.type),
+              resizeEpoch: String(control.resize_epoch || ""),
+              cols: Number(control.cols || 0),
+              rows: Number(control.rows || 0),
+              pixelWidth: Number(control.pixel_width || 0),
+              pixelHeight: Number(control.pixel_height || 0),
+              reason: String(control.reason || ""),
+            });
+            if (window.__testsAutoResizeResponses.length > 4000) {
+              window.__testsAutoResizeResponses.splice(0, window.__testsAutoResizeResponses.length - 4000);
+            }
+          }
           if (typeof value?.data === "string") window.__testsAutoTerminalOutput += value.data;
           else if (typeof value?.payload?.data === "string") window.__testsAutoTerminalOutput += value.payload.data;
         } catch {}
@@ -312,10 +354,14 @@ const createWindow = async (name, viewport, position) => {
     captureTimeline: config.captureTerminalTimeline,
     enableInitializationPerformance: config.enableInitializationPerformance,
   });
+  await beforeNavigate?.(state);
   page.on("console", (message) => {
     const text = message.text();
+    const sourceURL = String(message.location()?.url || "");
+    const ignorableFaviconError = message.type() === "error" && /\/favicon\.ico(?:$|[?#])/.test(sourceURL);
     if (text.includes("resize-error")) state.resizeErrors += 1;
-    eventLog({ status: "info", window: name, action: "console", type: message.type(), message: text });
+    if (message.type() === "error" && !ignorableFaviconError) state.fatalErrors.push(`console error: ${text}`);
+    eventLog({ status: "info", window: name, action: "console", type: message.type(), sourceURL, message: text });
   });
   page.on("pageerror", (error) => {
     state.fatalErrors.push(`pageerror: ${error.message}`);
@@ -325,9 +371,16 @@ const createWindow = async (name, viewport, position) => {
     const errorText = request.failure()?.errorText || "";
     const aborted = errorText.includes("ERR_ABORTED");
     const message = `${request.method()} ${request.url()} ${errorText}`;
-    if (!aborted && request.url().includes("/assets/")) state.assetRequestFailures.push(message);
-    if (!aborted && request.url().includes("/api/")) state.fatalErrors.push(`requestfailed: ${message}`);
-    eventLog({ status: aborted ? "info" : "error", window: name, action: "requestfailed", message });
+    const assetFailure = !aborted && request.url().includes("/assets/");
+    const apiFailure = !aborted && request.url().includes("/api/");
+    if (assetFailure) state.assetRequestFailures.push(message);
+    if (assetFailure || apiFailure) state.fatalErrors.push(`requestfailed: ${message}`);
+    eventLog({
+      status: assetFailure || apiFailure ? "error" : "info",
+      window: name,
+      action: "requestfailed",
+      message,
+    });
   });
   page.on("response", (response) => {
     if (response.status() >= 400 && response.url().includes("/api/")) {
@@ -352,6 +405,7 @@ const createWindow = async (name, viewport, position) => {
   const authURL = new URL("/", config.url).toString();
   await page.goto(authURL, { waitUntil: "domcontentloaded", timeout: 60_000 });
   const loggedIn = await loginIfNeeded(page, name);
+  await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   const testURL = await resolveTestURL(page, name);
   await page.goto(testURL, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".terminal-pane.active .terminal-host", { timeout: 60_000 });
@@ -478,14 +532,20 @@ const persistPresentationProbe = async (state, artifactsDir) => {
   ).catch(() => {});
 };
 
-export const run = async (scenario) => {
+export const run = async (scenario, options = {}) => {
   const states = {};
+  config.targetKind = options.targetKind || "";
+  if (config.targetKind === "client" && process.env.WEBSHELL_CLIENT_TEST_URL) {
+    config.url = process.env.WEBSHELL_CLIENT_TEST_URL;
+  }
   try {
-    states.desktop = await createWindow("desktop", { width: 1440, height: 900 }, { x: 0, y: 0 });
+    states.desktop = await createWindow("desktop", { width: 1440, height: 900 }, { x: 0, y: 0 }, (state) => { states.desktop = state; }, options.beforeNavigate);
     config.url = await createIsolatedTab(states.desktop);
     states.desktop.activePaneID = await states.desktop.page.locator(".terminal-pane.active .pane-shell").first().getAttribute("data-pane-id");
-    states.mobile = await createWindow("mobile", { width: 390, height: 844 }, { x: 1450, y: 0 });
-    states.mobile.activePaneID = await states.mobile.page.locator(".terminal-pane.active .pane-shell").first().getAttribute("data-pane-id");
+    if (options.desktopOnly !== true) {
+      states.mobile = await createWindow("mobile", { width: 390, height: 844 }, { x: 1450, y: 0 }, (state) => { states.mobile = state; }, options.beforeNavigate);
+      states.mobile.activePaneID = await states.mobile.page.locator(".terminal-pane.active .pane-shell").first().getAttribute("data-pane-id");
+    }
     const assertNoFatalErrors = () => {
       const errors = Object.values(states).flatMap((state) => state.fatalErrors.map((message) => `${state.name}: ${message}`));
       if (errors.length) throw new Error(errors.join("\n"));
@@ -513,9 +573,15 @@ export const run = async (scenario) => {
     await Promise.all(Object.values(states).map(async (state) => state.context.tracing.stop({ path: path.join(artifactsDir, `${state.name}-trace.zip`) }).catch(() => {})));
     await Promise.all(Object.values(states).map(async (state) => state.context.close().catch(() => {})));
     await Promise.all(Object.values(states).map(async (state) => state.browser.close().catch(() => {})));
+    const zipUtilities = await import(pathToFileURL(path.join(moduleRoot, "playwright-core/lib/utilsBundle.js")));
+    await redactBrowserArtifacts(artifactsDir, {
+      secrets: [config.username, config.password],
+      yauzl: zipUtilities.yauzl,
+      yazl: zipUtilities.yazl,
+    });
   }
 };
 
 const scenario = await import(pathToFileURL(caseFile));
 if (typeof scenario.run !== "function") throw new Error(`${caseFile} must export run(context)`);
-await run(scenario.run);
+await run(scenario.run, scenario);

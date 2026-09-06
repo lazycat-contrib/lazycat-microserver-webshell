@@ -153,6 +153,11 @@ const createController = ({ session, unified = false, client = false, historyRan
   };
   const terminalResize = {
     size: () => ({ cols: 100, rows: 30, pixelWidth: 800, pixelHeight: 480 }),
+    beginConnection: (targetSession, options) => events.push([
+      "resize-connection",
+      targetSession.connectionEpoch,
+      options?.connectionEpoch,
+    ]),
     resizePane() {},
     handleOwnerReleased() {},
     handleApplied() {},
@@ -250,6 +255,11 @@ test("direct protocol controller builds a scoped socket and keeps timer ownershi
   assert.equal(socket.binaryType, "arraybuffer");
   assert.equal(harness.socketTimers.length, 1);
   assert.equal(session.socket, socket);
+  assert.deepEqual(harness.events.find((event) => event?.[0] === "resize-connection"), [
+    "resize-connection",
+    1,
+    1,
+  ]);
 });
 
 test("Unified protocol controller opens one logical stream with generation and identity metadata", async () => {
@@ -269,6 +279,11 @@ test("Unified protocol controller opens one logical stream with generation and i
   assert.equal(harness.events.includes("prepare"), false);
   assert.equal(harness.events.includes("range"), false);
   assert.equal(session.socket?.readyState, FakeSocket.OPEN);
+  assert.deepEqual(harness.events.find((event) => event?.[0] === "resize-connection"), [
+    "resize-connection",
+    1,
+    1,
+  ]);
 
   const queueMetadata = { paneID: "pane-1", streamID: "stream-1", channelGeneration: 3 };
   session.socket.emit("message", {
